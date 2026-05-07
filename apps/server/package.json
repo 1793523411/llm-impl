@@ -1,0 +1,17 @@
+{
+  "name": "@llm-impl/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/index.ts",
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.1",
+    "@llm-impl/shared": "workspace:*",
+    "hono": "^4.6.14",
+    "openai": "^4.78.1",
+    "zod": "^3.23.8"
+  }
+}
