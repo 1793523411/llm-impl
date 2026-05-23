@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { Compare } from './Compare'
+import { AlertDialog, ConfirmDialog } from './ui/AppDialog'
 
 type Theme = 'dark' | 'light'
 
@@ -20,6 +21,8 @@ export function Toolbar() {
   const [copyMsg, setCopyMsg] = useState<string | null>(null)
   const [comparing, setComparing] = useState(false)
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false)
 
   useEffect(() => {
     document.documentElement.classList.toggle('light', theme === 'light')
@@ -44,7 +47,7 @@ export function Toolbar() {
       setImporting(false)
       setImportText('')
     } catch (e) {
-      alert(`Invalid JSON: ${(e as Error).message}`)
+      setErrorMessage(`Invalid JSON: ${(e as Error).message}`)
     }
   }
 
@@ -76,14 +79,32 @@ export function Toolbar() {
       </button>
       <button
         className="btn-danger"
-        onClick={() => {
-          if (confirm('Reset messages?')) reset()
-        }}
+        onClick={() => setResetConfirmOpen(true)}
       >
         Reset
       </button>
 
       {comparing && <Compare onClose={() => setComparing(false)} />}
+
+      <ConfirmDialog
+        open={resetConfirmOpen}
+        title="Reset Messages"
+        message="Reset all messages in the current case?"
+        confirmLabel="Reset"
+        danger
+        onCancel={() => setResetConfirmOpen(false)}
+        onConfirm={() => {
+          setResetConfirmOpen(false)
+          reset()
+        }}
+      />
+
+      <AlertDialog
+        open={!!errorMessage}
+        title="Import Failed"
+        message={errorMessage ?? ''}
+        onClose={() => setErrorMessage(null)}
+      />
 
       {importing && (
         <div

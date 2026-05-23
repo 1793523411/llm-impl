@@ -7,7 +7,8 @@
 这部分会跟着请求一起发给模型，让模型知道"我可以调这些"。
 
 **2. 服务端实际能跑的 tool** — 在 `apps/server/src/exec-tool.ts` 写死的白名单。
-默认有 3 个：`get_time` / `web_fetch` / `calculator`。
+默认包含一组基础工具：`get_time` / `run_command` / `read_file` /
+`list_files` / `search_code` / `fetch_url` / `web_fetch` / `calculator`。
 
 两者**通过 name 字段对应**：你定义一个 `calculator` 工具给模型，模型决定调它，
 如果服务端白名单里也有同名 `calculator`，前端就显示 ▶ run 按钮可一键真执行。
@@ -62,12 +63,17 @@
 }
 ```
 
-### 默认 3 个
+### 默认基础工具
 
 | name | 干啥 | 安全约束 |
 |---|---|---|
-| `get_time` | 返回当前 ISO timestamp | 无副作用 |
-| `web_fetch` | GET 一个 URL，返回 text | 限 http(s)，10s 超时，10KB 截断 |
+| `get_time` | 返回当前日期、时间、星期、时区、timestamp | 无副作用，可指定 IANA timezone |
+| `run_command` | 执行本地 shell 命令，适合调试 skill 里的 bash/script | 危险系统命令拦截，默认 60s 超时，输出截断 |
+| `read_file` | 读取本地文本文件，带行号 | 大文件需要 `offset` / `limit` |
+| `list_files` | 列目录、按 glob 过滤 | 自动跳过 `node_modules` / `.git` 等噪音目录 |
+| `search_code` | 本地代码 regex / symbol 搜索 | 优先 `rg`，失败回退 `grep`，输出截断 |
+| `fetch_url` | GET 一个 URL，返回 text/html/json | 限 http(s)，15s 超时，最大 128KB |
+| `web_fetch` | `fetch_url` 的兼容别名 | 同上 |
 | `calculator` | 算数学表达式 | 正则白名单字符 `[\d\s+\-*/().]+`，`new Function` 跑 |
 
 ### 增加一个工具

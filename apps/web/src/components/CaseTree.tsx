@@ -1,6 +1,7 @@
 import { useState, type DragEvent } from 'react'
 import { useStore } from '../store'
 import type { CaseEntry } from '../api'
+import { AlertDialog, ConfirmDialog, PromptDialog } from './ui/AppDialog'
 
 const CASE_DRAG_TYPE = 'application/x-llm-case-entry'
 
@@ -8,6 +9,12 @@ type DragPayload = {
   path: string
   type: CaseEntry['type']
 }
+
+type CaseTreeDialog =
+  | { kind: 'new-case'; dir: string; value: string; error?: string }
+  | { kind: 'new-folder'; dir: string; value: string; error?: string }
+  | { kind: 'delete-case'; path: string }
+  | { kind: 'alert'; title: string; message: string }
 
 const basename = (entryPath: string): string => entryPath.split('/').pop() ?? entryPath
 
@@ -56,6 +63,7 @@ function TreeNode({
   onDropToDir,
   onNewCase,
   onNewFolder,
+  onDeleteCase,
 }: {
   entry: CaseEntry
   depth: number
@@ -66,10 +74,10 @@ function TreeNode({
   onDropToDir: (dir: string, event: DragEvent) => void
   onNewCase: (dir: string) => void
   onNewFolder: (dir: string) => void
+  onDeleteCase: (path: string) => void
 }) {
   const [open, setOpen] = useState(true)
   const loadCase = useStore((s) => s.loadCase)
-  const deleteCase = useStore((s) => s.deleteCase)
   const currentCasePath = useStore((s) => s.currentCasePath)
   const isActive = currentCasePath === entry.path
   const dragClass = dragOverDir === entry.path ? 'is-drop-target' : ''
@@ -146,6 +154,7 @@ function TreeNode({
               onDropToDir={onDropToDir}
               onNewCase={onNewCase}
               onNewFolder={onNewFolder}
+              onDeleteCase={onDeleteCase}
             />
           ))}
       </div>
@@ -168,7 +177,7 @@ function TreeNode({
         title="Delete"
         onClick={(e) => {
           e.stopPropagation()
-          if (confirm(`Delete ${entry.path}?`)) deleteCase(entry.path)
+          onDeleteCase(entry.path)
         }}
       >
         ✕
@@ -181,39 +190,60 @@ export function CaseTree() {
   const cases = useStore((s) => s.cases)
   const refreshCases = useStore((s) => s.refreshCases)
   const newCase = useStore((s) => s.newCase)
+  const deleteCase = useStore((s) => s.deleteCase)
   const createCaseDir = useStore((s) => s.createCaseDir)
   const moveCaseEntry = useStore((s) => s.moveCaseEntry)
   const [selectedDir, setSelectedDir] = useState('')
   const [dragOverDir, setDragOverDir] = useState<string | null>(null)
+  const [dialog, setDialog] = useState<CaseTreeDialog | null>(null)
+
+  const showAlert = (title: string, message: string) =>
+    setDialog({ kind: 'alert', title, message })
 
   const handleNewCase = (dir = selectedDir) => {
-    const input = prompt(
-      `Case name under ${displayDir(dir)}. Leave empty for an auto name.`,
-      '',
-    )
-    if (input === null) return
+    setDialog({ kind: 'new-case', dir, value: '' })
+  }
+
+  const confirmNewCase = () => {
+    if (dialog?.kind !== 'new-case') return
+    const input = dialog.value
     const name = input.trim() ? cleanPathInput(input) : ''
     if (input.trim() && !name) {
-      alert('Invalid case name')
+      setDialog({ ...dialog, error: 'Invalid case name' })
       return
     }
-    newCase(dir, name || undefined).catch((e) =>
-      alert(`create failed: ${(e as Error).message}`),
+    setDialog(null)
+    newCase(dialog.dir, name || undefined).catch((e) =>
+      showAlert('Create Failed', (e as Error).message),
     )
   }
 
   const handleNewFolder = (dir = selectedDir) => {
-    const input = prompt(`Folder name under ${displayDir(dir)}`, '')
-    if (input === null) return
+    setDialog({ kind: 'new-folder', dir, value: '' })
+  }
+
+  const confirmNewFolder = () => {
+    if (dialog?.kind !== 'new-folder') return
+    const input = dialog.value
     const child = cleanPathInput(input)
     if (!child) {
-      alert('Invalid folder name')
+      setDialog({ ...dialog, error: 'Invalid folder name' })
       return
     }
-    const nextDir = joinPath(dir, child)
+    const nextDir = joinPath(dialog.dir, child)
+    setDialog(null)
     createCaseDir(nextDir)
       .then(() => setSelectedDir(nextDir))
-      .catch((e) => alert(`folder create failed: ${(e as Error).message}`))
+      .catch((e) => showAlert('Folder Create Failed', (e as Error).message))
+  }
+
+  const confirmDeleteCase = () => {
+    if (dialog?.kind !== 'delete-case') return
+    const target = dialog.path
+    setDialog(null)
+    deleteCase(target).catch((e) =>
+      showAlert('Delete Failed', (e as Error).message),
+    )
   }
 
   const handleDropToDir = (targetDir: string, event: DragEvent) => {
@@ -227,7 +257,7 @@ export function CaseTree() {
       payload.type === 'dir' &&
       (targetDir === payload.path || targetDir.startsWith(`${payload.path}/`))
     ) {
-      alert('Cannot move a folder into itself')
+      showAlert('Move Blocked', 'Cannot move a folder into itself.')
       return
     }
 
@@ -247,7 +277,7 @@ export function CaseTree() {
           )
         }
       })
-      .catch((e) => alert(`move failed: ${(e as Error).message}`))
+      .catch((e) => showAlert('Move Failed', (e as Error).message))
   }
 
   return (
@@ -313,9 +343,61 @@ export function CaseTree() {
             onDropToDir={handleDropToDir}
             onNewCase={handleNewCase}
             onNewFolder={handleNewFolder}
+            onDeleteCase={(path) => setDialog({ kind: 'delete-case', path })}
           />
         ))}
       </div>
+
+      {dialog?.kind === 'new-case' && (
+        <PromptDialog
+          open
+          title="New Case"
+          description={`Case name under ${displayDir(dialog.dir)}. Leave empty for an auto name.`}
+          value={dialog.value}
+          error={dialog.error}
+          placeholder="case-name"
+          confirmLabel="Create"
+          onValueChange={(value) => setDialog({ ...dialog, value, error: undefined })}
+          onConfirm={confirmNewCase}
+          onCancel={() => setDialog(null)}
+        />
+      )}
+
+      {dialog?.kind === 'new-folder' && (
+        <PromptDialog
+          open
+          title="New Folder"
+          description={`Folder name under ${displayDir(dialog.dir)}.`}
+          value={dialog.value}
+          error={dialog.error}
+          placeholder="folder-name"
+          confirmLabel="Create"
+          onValueChange={(value) => setDialog({ ...dialog, value, error: undefined })}
+          onConfirm={confirmNewFolder}
+          onCancel={() => setDialog(null)}
+        />
+      )}
+
+      {dialog?.kind === 'delete-case' && (
+        <ConfirmDialog
+          open
+          title="Delete Case"
+          message={`Delete ${dialog.path}?`}
+          confirmLabel="Delete"
+          danger
+          onConfirm={confirmDeleteCase}
+          onCancel={() => setDialog(null)}
+        />
+      )}
+
+      {dialog?.kind === 'alert' && (
+        <AlertDialog
+          open
+          title={dialog.title}
+          message={dialog.message}
+          onClose={() => setDialog(null)}
+        />
+      )}
     </aside>
   )
 }

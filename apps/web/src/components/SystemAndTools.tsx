@@ -10,6 +10,7 @@ import { useStore } from '../store'
 import { toolNameForMcpTool } from '../store'
 import { ModelConfigForm } from './ConfigPanel'
 import { ModelInputPreview } from './ModelInputPreview'
+import { AlertDialog } from './ui/AppDialog'
 
 type SetupTab = 'model' | 'tools' | 'skills' | 'mcp' | 'input'
 
@@ -296,6 +297,7 @@ function SkillsTab() {
   const removeSkill = useStore((s) => s.removeSkill)
   const [rootsText, setRootsText] = useState(() => skillRoots.join('\n'))
   const [refreshing, setRefreshing] = useState(false)
+  const [alertMessage, setAlertMessage] = useState<string | null>(null)
   const enabledCount = skills.filter((skill) => skill.enabled).length
 
   useEffect(() => {
@@ -325,7 +327,7 @@ function SkillsTab() {
     try {
       await refreshSkills()
     } catch (e) {
-      alert(`Skill discovery failed: ${(e as Error).message}`)
+      setAlertMessage((e as Error).message)
     } finally {
       setRefreshing(false)
     }
@@ -371,6 +373,12 @@ function SkillsTab() {
           onRemove={() => removeSkill(i)}
         />
       ))}
+      <AlertDialog
+        open={!!alertMessage}
+        title="Skill Discovery Failed"
+        message={alertMessage ?? ''}
+        onClose={() => setAlertMessage(null)}
+      />
     </div>
   )
 }
@@ -383,6 +391,7 @@ function McpTab() {
   const updateMcpTool = useStore((s) => s.updateMcpTool)
   const refreshMcpServerTools = useStore((s) => s.refreshMcpServerTools)
   const [busyIndex, setBusyIndex] = useState<number | null>(null)
+  const [alertMessage, setAlertMessage] = useState<string | null>(null)
 
   return (
     <div className="setup-section space-y-3">
@@ -407,7 +416,7 @@ function McpTab() {
             try {
               await refreshMcpServerTools(i)
             } catch (e) {
-              alert(`MCP tools failed: ${(e as Error).message}`)
+              setAlertMessage((e as Error).message)
             } finally {
               setBusyIndex(null)
             }
@@ -415,6 +424,12 @@ function McpTab() {
           onToolChange={(toolIdx, patch) => updateMcpTool(i, toolIdx, patch)}
         />
       ))}
+      <AlertDialog
+        open={!!alertMessage}
+        title="MCP Tools Failed"
+        message={alertMessage ?? ''}
+        onClose={() => setAlertMessage(null)}
+      />
     </div>
   )
 }

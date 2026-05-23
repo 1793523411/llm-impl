@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import type {
   AssistantContentBlock,
   Message,
@@ -312,11 +312,13 @@ function ToolResultBlockEditor({
 
   // resolve the tool_use this is a result for (for the ▶ run button)
   let matchingToolName: string | undefined
+  let matchingToolInput: Record<string, unknown> | undefined
   for (const m of messages) {
     if (m.role !== 'assistant') continue
     for (const b of m.content) {
       if (b.type === 'tool_use' && b.id === block.tool_use_id) {
         matchingToolName = b.name
+        matchingToolInput = b.input
       }
     }
   }
@@ -335,6 +337,16 @@ function ToolResultBlockEditor({
           <span>matches</span>
           <code>{matchingToolName}</code>
         </div>
+      )}
+      {matchingToolInput && (
+        <details className="mt-1">
+          <summary className="cursor-pointer text-[10px] uppercase tracking-wider text-zinc-500">
+            input params
+          </summary>
+          <pre className="tool-schema-preview scrollbar">
+            {JSON.stringify(matchingToolInput, null, 2)}
+          </pre>
+        </details>
       )}
       <div className="flex gap-1">
         <label className="tool-call-id-field flex-1">
@@ -394,6 +406,8 @@ function ToolUseBlockEditor({
     JSON.stringify(block.input, null, 2),
   )
   const [inputError, setInputError] = useState<string | null>(null)
+  const lastSyncedBlockIdRef = useRef(block.id)
+  const lastSyncedInputRef = useRef(JSON.stringify(block.input, null, 2))
   const tools = useStore((s) => s.tools)
   const skills = useStore((s) => s.skills)
   const mcpServers = useStore((s) => s.mcpServers)
@@ -415,10 +429,18 @@ function ToolUseBlockEditor({
   void skills
   void mcpServers
 
+  const serializedInput = JSON.stringify(block.input, null, 2)
+
   useEffect(() => {
-    setInputText(JSON.stringify(block.input, null, 2))
-    setInputError(null)
-  }, [block.id])
+    const isNewBlock = lastSyncedBlockIdRef.current !== block.id
+    const localIsSynced = inputText === lastSyncedInputRef.current
+    if (isNewBlock || localIsSynced) {
+      setInputText(serializedInput)
+      setInputError(null)
+    }
+    lastSyncedBlockIdRef.current = block.id
+    lastSyncedInputRef.current = serializedInput
+  }, [block.id, inputText, serializedInput])
 
   return (
     <BlockShell label="tool_use" accent="text-emerald-400" onRemove={onRemove}>

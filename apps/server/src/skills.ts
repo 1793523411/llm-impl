@@ -111,6 +111,7 @@ export async function loadSkillContent(skill: SkillConfig): Promise<string> {
     `<skill_directory>${skill.dirPath}</skill_directory>`,
     `<important>`,
     `When executing any scripts from this skill, ALWAYS set working_directory to "${skill.dirPath}" in the run_command call.`,
+    `For bash snippets or shell-based debugging steps in this skill, use run_command and inspect status, exit_code, stdout, and stderr before deciding the next step.`,
     `All script paths shown below are absolute paths. Use them exactly as shown.`,
     `If a script references relative paths (e.g., ./images/, ./output/), they are relative to the skill directory above.`,
     `</important>`,
