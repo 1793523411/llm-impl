@@ -7,6 +7,8 @@ import type {
 } from '@llm-impl/shared'
 import { useStore } from '../store'
 import * as api from '../api'
+import { Select } from './ui/Select'
+import { MarkdownPreview } from './MarkdownPreview'
 
 type PaneState = {
   config: Config
@@ -18,12 +20,24 @@ type PaneState = {
   stopReason?: string | null
 }
 
+const COMPARE_STREAM_FLUSH_MS = 50
+
 export function Compare({ onClose }: { onClose: () => void }) {
   const providers = useStore((s) => s.providers)
   const baseConfig = useStore((s) => s.config)
   const system = useStore((s) => s.system)
   const tools = useStore((s) => s.tools)
+  const skills = useStore((s) => s.skills)
+  const mcpServers = useStore((s) => s.mcpServers)
+  const getEffectiveSystem = useStore((s) => s.getEffectiveSystem)
+  const getEffectiveTools = useStore((s) => s.getEffectiveTools)
   const messages = useStore((s) => s.messages)
+  const effectiveSystem = getEffectiveSystem()
+  const effectiveTools = getEffectiveTools()
+  void system
+  void tools
+  void skills
+  void mcpServers
 
   const [left, setLeft] = useState<PaneState>(() => ({
     config: { ...baseConfig },
@@ -60,55 +74,99 @@ export function Compare({ onClose }: { onClose: () => void }) {
       stopReason: undefined,
     }))
     const inputBuffers = new Map<number, string>()
+    let draftMessage: AssistantMessage = { role: 'assistant', content: [] }
+    let flushTimer: ReturnType<typeof setTimeout> | null = null
+    let hasPendingMessage = false
+
+    const flushMessage = () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer)
+        flushTimer = null
+      }
+      if (!hasPendingMessage) return
+      hasPendingMessage = false
+      setter((s) => ({ ...s, message: draftMessage }))
+    }
+
+    const scheduleMessageFlush = () => {
+      hasPendingMessage = true
+      if (flushTimer) return
+      flushTimer = setTimeout(flushMessage, COMPARE_STREAM_FLUSH_MS)
+    }
+
+    const updateMessage = (
+      mut: (message: AssistantMessage) => AssistantMessage,
+    ) => {
+      draftMessage = mut(draftMessage)
+      scheduleMessageFlush()
+    }
+
     try {
       for await (const ev of api.postRunStream({
         config,
-        system: system || undefined,
-        tools: tools.length > 0 ? tools : undefined,
+        system: effectiveSystem || undefined,
+        tools: effectiveTools.length > 0 ? effectiveTools : undefined,
         messages,
       })) {
         if (ev.type === 'block_start') {
-          setter((s) => {
-            const content = [...s.message.content]
+          updateMessage((message) => {
+            const content = [...message.content]
             content[ev.index] = ev.block
-            return { ...s, message: { ...s.message, content } }
+            return { ...message, content }
           })
           if (ev.block.type === 'tool_use') inputBuffers.set(ev.index, '')
         } else if (ev.type === 'text_delta') {
-          setter((s) => {
-            const content = [...s.message.content]
+          updateMessage((message) => {
+            const content = [...message.content]
             const b = content[ev.index]
             if (b && b.type === 'text') {
               content[ev.index] = { ...b, text: b.text + ev.delta }
             }
-            return { ...s, message: { ...s.message, content } }
+            return { ...message, content }
           })
         } else if (ev.type === 'thinking_delta') {
-          setter((s) => {
-            const content = [...s.message.content]
+          updateMessage((message) => {
+            const content = [...message.content]
             const b = content[ev.index]
             if (b && b.type === 'thinking') {
               content[ev.index] = { ...b, thinking: b.thinking + ev.delta }
             }
-            return { ...s, message: { ...s.message, content } }
+            return { ...message, content }
+          })
+        } else if (ev.type === 'thinking_signature_delta') {
+          updateMessage((message) => {
+            const content = [...message.content]
+            const b = content[ev.index]
+            if (b && b.type === 'thinking') {
+              content[ev.index] = {
+                ...b,
+                signature: `${b.signature ?? ''}${ev.delta}`,
+              }
+            }
+            return { ...message, content }
           })
         } else if (ev.type === 'tool_input_delta') {
           const buf = (inputBuffers.get(ev.index) ?? '') + ev.delta
           inputBuffers.set(ev.index, buf)
-          try {
-            const parsed = JSON.parse(buf) as Record<string, unknown>
-            setter((s) => {
-              const content = [...s.message.content]
-              const b = content[ev.index]
-              if (b && b.type === 'tool_use') {
-                content[ev.index] = { ...b, input: parsed }
-              }
-              return { ...s, message: { ...s.message, content } }
-            })
-          } catch {
-            /* partial */
+        } else if (ev.type === 'block_stop') {
+          const buf = inputBuffers.get(ev.index)
+          if (buf !== undefined) {
+            try {
+              const parsed = JSON.parse(buf || '{}') as Record<string, unknown>
+              updateMessage((message) => {
+                const content = [...message.content]
+                const b = content[ev.index]
+                if (b && b.type === 'tool_use') {
+                  content[ev.index] = { ...b, input: parsed }
+                }
+                return { ...message, content }
+              })
+            } catch {
+              /* leave the empty input if provider ended with malformed JSON */
+            }
           }
         } else if (ev.type === 'message_stop') {
+          flushMessage()
           setter((s) => ({
             ...s,
             status: 'done',
@@ -120,7 +178,9 @@ export function Compare({ onClose }: { onClose: () => void }) {
           throw new Error(ev.message)
         }
       }
+      flushMessage()
     } catch (e) {
+      flushMessage()
       setter((s) => ({ ...s, status: 'error', error: (e as Error).message }))
     }
   }
@@ -197,34 +257,33 @@ function Pane({
       <div className="p-2 border-b border-zinc-800 bg-zinc-950 space-y-1">
         <div className="flex items-center gap-2">
           <span className="label">pane {title}</span>
-          <select
-            className="field text-xs flex-1"
+          <Select
+            className="flex-1"
             value={state.config.provider}
-            onChange={(e) => {
-              const p = providers.find((x) => x.key === e.target.value)
+            onChange={(value) => {
+              const p = providers.find((x) => x.key === value)
               onConfigChange({
-                provider: e.target.value,
+                provider: value,
                 model: p?.models[0]?.id ?? state.config.model,
               })
             }}
-          >
-            {providers.map((p) => (
-              <option key={p.key} value={p.key}>
-                {p.key}
-              </option>
-            ))}
-          </select>
-          <select
-            className="field text-xs flex-1"
+            options={providers.map((p) => ({
+              value: p.key,
+              label: p.key,
+              searchText: `${p.key} ${p.api}`,
+            }))}
+          />
+          <Select
+            className="flex-1"
             value={state.config.model}
-            onChange={(e) => onConfigChange({ model: e.target.value })}
-          >
-            {provider?.models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name ?? m.id}
-              </option>
-            ))}
-          </select>
+            onChange={(value) => onConfigChange({ model: value })}
+            options={(provider?.models ?? []).map((m) => ({
+              value: m.id,
+              label: m.name ?? m.id,
+              searchText: `${m.id} ${m.name ?? ''}`,
+            }))}
+            placeholder="model"
+          />
         </div>
         <div className="text-[10px] text-zinc-500 flex items-center gap-3">
           <span>{state.status}</span>
@@ -259,7 +318,7 @@ function BlockView({ block }: { block: AssistantContentBlock }) {
     return (
       <div className="rounded border border-zinc-800 bg-zinc-950/50 p-2">
         <div className="label mb-1">text</div>
-        <div className="text-sm whitespace-pre-wrap font-mono">{block.text}</div>
+        <MarkdownPreview>{block.text}</MarkdownPreview>
       </div>
     )
   }

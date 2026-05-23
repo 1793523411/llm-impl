@@ -3,15 +3,35 @@ import type {
   RunResponse,
   Case,
   ProviderInfo,
+  ProviderTestResponse,
   StreamEvent,
   ExecToolDef,
   ExecToolResponse,
+  McpCallToolResponse,
+  McpListToolsResponse,
+  McpServerConfig,
+  SkillConfig,
+  SkillListResponse,
 } from '@llm-impl/shared'
 
 export async function listProviders(): Promise<ProviderInfo[]> {
   const res = await fetch('/api/providers')
   if (!res.ok) throw new Error(`providers failed: ${res.status}`)
   return res.json()
+}
+
+export async function testProviderModel(
+  provider: string,
+  model: string,
+): Promise<ProviderTestResponse> {
+  const res = await fetch('/api/providers/test', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ provider, model }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error ?? `provider test failed: ${res.status}`)
+  return data as ProviderTestResponse
 }
 
 export async function getWorkspace(): Promise<unknown | null> {
@@ -104,6 +124,56 @@ export async function execTool(
   return res.json()
 }
 
+export async function listSkills(roots: string[]): Promise<SkillListResponse> {
+  const res = await fetch('/api/skills/list', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ roots }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error ?? `skills list failed: ${res.status}`)
+  return data as SkillListResponse
+}
+
+export async function loadSkill(skill: SkillConfig): Promise<ExecToolResponse> {
+  const res = await fetch('/api/skills/load', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ skill }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.content ?? `skill load failed: ${res.status}`)
+  return data as ExecToolResponse
+}
+
+export async function listMcpTools(
+  server: McpServerConfig,
+): Promise<McpListToolsResponse> {
+  const res = await fetch('/api/mcp/list-tools', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ server }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error ?? `mcp list failed: ${res.status}`)
+  return data as McpListToolsResponse
+}
+
+export async function callMcpTool(
+  server: McpServerConfig,
+  toolName: string,
+  input: unknown,
+): Promise<McpCallToolResponse> {
+  const res = await fetch('/api/mcp/call-tool', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ server, toolName, input }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error ?? `mcp call failed: ${res.status}`)
+  return data as McpCallToolResponse
+}
+
 export type CaseEntry = {
   path: string
   type: 'file' | 'dir'
@@ -129,6 +199,27 @@ export async function writeCase(path: string, data: Case): Promise<void> {
     body: JSON.stringify(data),
   })
   if (!res.ok) throw new Error(`save failed: ${res.status}`)
+}
+
+export async function createCaseDir(path: string): Promise<void> {
+  const res = await fetch('/api/case-dirs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error ?? `mkdir failed: ${res.status}`)
+}
+
+export async function moveCaseEntry(from: string, to: string): Promise<void> {
+  const res = await fetch('/api/cases/move', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ from, to }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error ?? `move failed: ${res.status}`)
+  if (data.ok === false) throw new Error('source not found')
 }
 
 export async function deleteCase(path: string): Promise<void> {

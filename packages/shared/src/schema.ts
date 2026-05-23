@@ -8,11 +8,17 @@ export type TextBlock = z.infer<typeof TextBlock>
 
 export const ImageBlock = z.object({
   type: z.literal('image'),
-  source: z.object({
-    type: z.literal('base64'),
-    media_type: z.string(),
-    data: z.string(),
-  }),
+  source: z.discriminatedUnion('type', [
+    z.object({
+      type: z.literal('base64'),
+      media_type: z.string(),
+      data: z.string(),
+    }),
+    z.object({
+      type: z.literal('url'),
+      url: z.string().min(1),
+    }),
+  ]),
 })
 export type ImageBlock = z.infer<typeof ImageBlock>
 
@@ -75,7 +81,50 @@ export const Tool = z.object({
 })
 export type Tool = z.infer<typeof Tool>
 
-export const ApiProtocol = z.enum(['openai-completions', 'anthropic-messages'])
+export const SkillConfig = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().optional(),
+  dirPath: z.string().optional(),
+  userUploaded: z.boolean().optional(),
+  source: z.enum(['skill-md', 'manual']).default('skill-md').optional(),
+  preload: z.boolean().default(false).optional(),
+  // Legacy manual skill fields kept so old case JSON can still load.
+  instruction: z.string().optional(),
+  input_schema: z.record(z.unknown()).optional(),
+  enabled: z.boolean().default(true),
+  exposeAsTool: z.boolean().default(false),
+})
+export type SkillConfig = z.infer<typeof SkillConfig>
+
+export const McpToolConfig = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  input_schema: z.record(z.unknown()).optional(),
+  enabled: z.boolean().default(true),
+})
+export type McpToolConfig = z.infer<typeof McpToolConfig>
+
+export const McpServerConfig = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  transport: z.enum(['stdio', 'streamablehttp']).default('stdio'),
+  command: z.string().optional(),
+  args: z.array(z.string()).default([]),
+  env: z.record(z.string()).optional(),
+  url: z.string().optional(),
+  headers: z.record(z.string()).optional(),
+  enabled: z.boolean().default(true),
+  timeout_ms: z.number().int().positive().optional(),
+  tools: z.array(McpToolConfig).default([]),
+})
+export type McpServerConfig = z.infer<typeof McpServerConfig>
+
+export const ApiProtocol = z.enum([
+  'openai-completions',
+  'openai-responses',
+  'anthropic-messages',
+])
 export type ApiProtocol = z.infer<typeof ApiProtocol>
 
 export const ModelInfo = z.object({
@@ -105,6 +154,31 @@ export const ProviderInfo = z.object({
   models: z.array(ModelInfo),
 })
 export type ProviderInfo = z.infer<typeof ProviderInfo>
+
+export const ProviderTestRequest = z.object({
+  provider: z.string().min(1),
+  model: z.string().min(1),
+})
+export type ProviderTestRequest = z.infer<typeof ProviderTestRequest>
+
+export const ProviderTestResponse = z.object({
+  ok: z.boolean(),
+  latency_ms: z.number().optional(),
+  stop_reason: z.string().nullable().optional(),
+  usage: z
+    .object({
+      input_tokens: z.number().optional(),
+      output_tokens: z.number().optional(),
+      cache_creation_input_tokens: z.number().optional(),
+      cache_read_input_tokens: z.number().optional(),
+    })
+    .partial()
+    .optional(),
+  sample: z.string().optional(),
+  error: z.string().optional(),
+  provider_error: z.unknown().optional(),
+})
+export type ProviderTestResponse = z.infer<typeof ProviderTestResponse>
 
 export const Config = z.object({
   provider: z.string().min(1),
@@ -166,6 +240,11 @@ export const StreamEvent = z.discriminatedUnion('type', [
     delta: z.string(),
   }),
   z.object({
+    type: z.literal('thinking_signature_delta'),
+    index: z.number(),
+    delta: z.string(),
+  }),
+  z.object({
     type: z.literal('tool_input_delta'),
     index: z.number(),
     delta: z.string(),
@@ -207,6 +286,49 @@ export const ExecToolDef = z.object({
 })
 export type ExecToolDef = z.infer<typeof ExecToolDef>
 
+export const SkillListRequest = z.object({
+  roots: z.array(z.string()).default([]),
+})
+export type SkillListRequest = z.infer<typeof SkillListRequest>
+
+export const SkillListResponse = z.object({
+  ok: z.boolean(),
+  skills: z.array(SkillConfig).optional(),
+  error: z.string().optional(),
+})
+export type SkillListResponse = z.infer<typeof SkillListResponse>
+
+export const SkillLoadRequest = z.object({
+  skill: SkillConfig,
+})
+export type SkillLoadRequest = z.infer<typeof SkillLoadRequest>
+
+export const McpListToolsRequest = z.object({
+  server: McpServerConfig,
+})
+export type McpListToolsRequest = z.infer<typeof McpListToolsRequest>
+
+export const McpListToolsResponse = z.object({
+  ok: z.boolean(),
+  tools: z.array(McpToolConfig).optional(),
+  error: z.string().optional(),
+  stderr: z.string().optional(),
+})
+export type McpListToolsResponse = z.infer<typeof McpListToolsResponse>
+
+export const McpCallToolRequest = z.object({
+  server: McpServerConfig,
+  toolName: z.string().min(1),
+  input: z.unknown().optional(),
+})
+export type McpCallToolRequest = z.infer<typeof McpCallToolRequest>
+
+export const McpCallToolResponse = ExecToolResponse.extend({
+  raw: z.unknown().optional(),
+  stderr: z.string().optional(),
+})
+export type McpCallToolResponse = z.infer<typeof McpCallToolResponse>
+
 export const Case = z.object({
   meta: z
     .object({
@@ -218,6 +340,9 @@ export const Case = z.object({
   config: Config,
   system: z.string().optional(),
   tools: z.array(Tool).optional(),
+  skillRoots: z.array(z.string()).optional(),
+  skills: z.array(SkillConfig).optional(),
+  mcpServers: z.array(McpServerConfig).optional(),
   messages: z.array(Message),
   lastRun: z
     .object({
@@ -229,4 +354,3 @@ export const Case = z.object({
     .optional(),
 })
 export type Case = z.infer<typeof Case>
-

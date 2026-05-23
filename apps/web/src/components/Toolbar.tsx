@@ -1,6 +1,13 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { Compare } from './Compare'
+
+type Theme = 'dark' | 'light'
+
+function getInitialTheme(): Theme {
+  if (typeof document === 'undefined') return 'dark'
+  return document.documentElement.classList.contains('light') ? 'light' : 'dark'
+}
 
 export function Toolbar() {
   const exportJson = useStore((s) => s.exportJson)
@@ -12,6 +19,14 @@ export function Toolbar() {
   const [importText, setImportText] = useState('')
   const [copyMsg, setCopyMsg] = useState<string | null>(null)
   const [comparing, setComparing] = useState(false)
+  const [theme, setTheme] = useState<Theme>(getInitialTheme)
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('light', theme === 'light')
+    document.documentElement.classList.toggle('dark', theme === 'dark')
+    document.documentElement.style.colorScheme = theme
+    localStorage.setItem('llm-impl-theme', theme)
+  }, [theme])
 
   const handleCopy = async () => {
     try {
@@ -37,9 +52,19 @@ export function Toolbar() {
     <header className="border-b border-zinc-800 bg-zinc-950 px-3 py-2 flex items-center gap-2">
       <span className="text-sm font-medium text-zinc-200">llm-impl</span>
       <span className="text-xs text-zinc-600 truncate flex-1">
-        {currentCasePath ? `· ${currentCasePath}` : '· (unsaved)'}
+        {currentCasePath ? `· ${currentCasePath}` : '· (no case selected)'}
       </span>
       {copyMsg && <span className="text-xs text-emerald-400">{copyMsg}</span>}
+      <button
+        className="btn theme-toggle"
+        onClick={() => setTheme((value) => (value === 'dark' ? 'light' : 'dark'))}
+        title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+        aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+        aria-pressed={theme === 'light'}
+      >
+        <span aria-hidden>{theme === 'dark' ? '☾' : '☀'}</span>
+        {theme === 'dark' ? 'Dark' : 'Light'}
+      </button>
       <button className="btn" onClick={() => setComparing(true)} title="Compare two models on the same conversation">
         ⇆ Compare
       </button>

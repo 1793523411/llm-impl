@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import type { ExecToolDef, ExecToolResponse } from '@llm-impl/shared'
 
 type ToolImpl = ExecToolDef & {
@@ -14,6 +15,85 @@ const tools: ToolImpl[] = [
       additionalProperties: false,
     },
     handler: async () => ({ content: new Date().toISOString() }),
+  },
+  {
+    name: 'run_command',
+    description:
+      'Run a local shell command. Use working_directory when executing skill scripts.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Shell command to run' },
+        working_directory: {
+          type: 'string',
+          description: 'Absolute directory to run the command in',
+        },
+        timeout_ms: {
+          type: 'number',
+          description: 'Optional timeout in milliseconds',
+        },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
+    handler: async (input) => {
+      const command = String(input.command ?? '').trim()
+      if (!command) return { content: 'command is required', is_error: true }
+      const cwd =
+        typeof input.working_directory === 'string' &&
+        input.working_directory.trim()
+          ? input.working_directory
+          : process.cwd()
+      const timeoutMs =
+        typeof input.timeout_ms === 'number' && input.timeout_ms > 0
+          ? Math.min(input.timeout_ms, 120_000)
+          : 30_000
+
+      return new Promise<ExecToolResponse>((resolve) => {
+        const child = spawn(command, {
+          cwd,
+          shell: true,
+          env: process.env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        let stdout = ''
+        let stderr = ''
+        const cap = (text: string) => text.slice(-20_000)
+        const timeout = setTimeout(() => {
+          child.kill('SIGTERM')
+          resolve({
+            content: `[timeout after ${timeoutMs}ms]\n${stdout}${stderr ? `\n[stderr]\n${stderr}` : ''}`,
+            is_error: true,
+          })
+        }, timeoutMs)
+
+        child.stdout.setEncoding('utf8')
+        child.stderr.setEncoding('utf8')
+        child.stdout.on('data', (chunk: string) => {
+          stdout = cap(stdout + chunk)
+        })
+        child.stderr.on('data', (chunk: string) => {
+          stderr = cap(stderr + chunk)
+        })
+        child.on('error', (error) => {
+          clearTimeout(timeout)
+          resolve({ content: error.message, is_error: true })
+        })
+        child.on('close', (code) => {
+          clearTimeout(timeout)
+          resolve({
+            content: [
+              `[exit ${code ?? 'unknown'}]`,
+              stdout.trimEnd(),
+              stderr.trimEnd() ? `[stderr]\n${stderr.trimEnd()}` : '',
+            ]
+              .filter(Boolean)
+              .join('\n'),
+            is_error: code !== 0,
+          })
+        })
+      })
+    },
   },
   {
     name: 'web_fetch',

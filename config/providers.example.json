@@ -15,6 +15,14 @@
       "models": [
         { "id": "gpt-4o", "name": "GPT-4o", "reasoning": false, "input": ["text", "image"], "contextWindow": 128000, "maxTokens": 16384 }
       ]
+    },
+    "ark-responses": {
+      "baseUrl": "https://ark-cn-beijing.bytedance.net/api/v3",
+      "apiKey": "ark-...",
+      "api": "openai-responses",
+      "models": [
+        { "id": "ep-...", "name": "Ark Responses model", "input": ["text", "image"], "maxTokens": 4096 }
+      ]
     }
   }
 }

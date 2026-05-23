@@ -70,6 +70,39 @@ export async function writeCase(rel: string, data: unknown): Promise<void> {
   await fs.writeFile(abs, JSON.stringify(data, null, 2), 'utf8')
 }
 
+export async function createCaseDir(rel: string): Promise<void> {
+  const abs = safeJoin(rel)
+  if (!abs) throw new Error('invalid path')
+  await fs.mkdir(abs, { recursive: true })
+}
+
+export async function moveCaseEntry(fromRel: string, toRel: string): Promise<boolean> {
+  const fromAbs = safeJoin(fromRel)
+  const toAbs = safeJoin(toRel)
+  if (!fromAbs || !toAbs || fromAbs === ROOT) throw new Error('invalid path')
+  if (fromAbs === toAbs) return true
+
+  const stat = await fs.stat(fromAbs).catch(() => null)
+  if (!stat) return false
+
+  if (stat.isFile() && !fromAbs.endsWith('.json')) {
+    throw new Error('only JSON case files can be moved')
+  }
+  if (stat.isFile() && !toAbs.endsWith('.json')) {
+    throw new Error('target case path must end with .json')
+  }
+  if (stat.isDirectory() && (toAbs === fromAbs || toAbs.startsWith(fromAbs + path.sep))) {
+    throw new Error('cannot move a folder into itself')
+  }
+
+  const targetExists = await fs.stat(toAbs).catch(() => null)
+  if (targetExists) throw new Error('target already exists')
+
+  await fs.mkdir(path.dirname(toAbs), { recursive: true })
+  await fs.rename(fromAbs, toAbs)
+  return true
+}
+
 export async function deleteCase(rel: string): Promise<boolean> {
   const abs = safeJoin(rel)
   if (!abs) return false

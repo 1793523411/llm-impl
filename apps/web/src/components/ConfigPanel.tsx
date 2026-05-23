@@ -1,38 +1,60 @@
+import { useState } from 'react'
+import type { ProviderTestResponse } from '@llm-impl/shared'
+import * as api from '../api'
 import { useStore } from '../store'
+import { Select } from './ui/Select'
 
-export function ConfigPanel() {
+function protocolLabel(api: string): string {
+  if (api === 'anthropic-messages') return 'anthropic'
+  if (api === 'openai-responses') return 'responses'
+  return 'openai'
+}
+
+export function ModelConfigForm() {
   const config = useStore((s) => s.config)
   const setConfig = useStore((s) => s.setConfig)
   const providers = useStore((s) => s.providers)
   const lastUsage = useStore((s) => s.lastUsage)
   const lastLatency = useStore((s) => s.lastLatency)
   const lastStopReason = useStore((s) => s.lastStopReason)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<ProviderTestResponse | null>(null)
 
   const currentProvider = providers.find((p) => p.key === config.provider)
   const currentModel = currentProvider?.models.find((m) => m.id === config.model)
 
+  const handleTest = async () => {
+    if (!config.provider || !config.model) return
+    setTesting(true)
+    setTestResult(null)
+    try {
+      setTestResult(await api.testProviderModel(config.provider, config.model))
+    } catch (e) {
+      setTestResult({ ok: false, error: (e as Error).message })
+    } finally {
+      setTesting(false)
+    }
+  }
+
   return (
-    <aside className="w-72 border-l border-zinc-800 bg-zinc-950 flex flex-col overflow-auto scrollbar">
-      <div className="p-3 space-y-4">
+    <div className="model-config-form space-y-4">
         <div>
           <div className="label mb-1">provider</div>
-          <select
-            className="field"
+          <Select
             value={config.provider}
-            onChange={(e) => {
-              const newKey = e.target.value
+            onChange={(newKey) => {
               const newProvider = providers.find((p) => p.key === newKey)
               const firstModelId = newProvider?.models[0]?.id ?? ''
+              setTestResult(null)
               setConfig({ provider: newKey, model: firstModelId })
             }}
-          >
-            {providers.length === 0 && <option value="">(loading…)</option>}
-            {providers.map((p) => (
-              <option key={p.key} value={p.key}>
-                {p.key} · {p.api === 'anthropic-messages' ? 'anthropic' : 'openai'}
-              </option>
-            ))}
-          </select>
+            placeholder={providers.length === 0 ? '(loading…)' : '(select provider)'}
+            options={providers.map((p) => ({
+              value: p.key,
+              label: `${p.key} · ${protocolLabel(p.api)}`,
+              searchText: `${p.key} ${p.api} ${p.baseUrl}`,
+            }))}
+          />
           {currentProvider && (
             <div className="text-[10px] text-zinc-600 mt-1 truncate">
               {currentProvider.baseUrl}
@@ -42,20 +64,32 @@ export function ConfigPanel() {
 
         <div>
           <div className="label mb-1">model</div>
-          <select
-            className="field"
-            value={config.model}
-            onChange={(e) => setConfig({ model: e.target.value })}
-          >
-            {!currentProvider && <option value="">(select provider)</option>}
-            {currentProvider?.models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name ?? m.id}
-                {m.reasoning ? ' 🧠' : ''}
-                {m.input?.includes('image') ? ' 🖼' : ''}
-              </option>
-            ))}
-          </select>
+          <div className="flex gap-1">
+            <Select
+              className="flex-1"
+              value={config.model}
+              onChange={(model) => {
+                setConfig({ model })
+                setTestResult(null)
+              }}
+              placeholder={currentProvider ? '(select model)' : '(select provider)'}
+              options={(currentProvider?.models ?? []).map((m) => ({
+                value: m.id,
+                label: `${m.name ?? m.id}${m.reasoning ? ' 🧠' : ''}${
+                  m.input?.includes('image') ? ' 🖼' : ''
+                }`,
+                searchText: `${m.id} ${m.name ?? ''}`,
+              }))}
+            />
+            <button
+              className="btn"
+              disabled={!currentProvider || !currentModel || testing}
+              onClick={handleTest}
+              title="Run a minimal request against this model"
+            >
+              {testing ? 'Testing…' : 'Test'}
+            </button>
+          </div>
           {currentModel && (
             <div className="text-[10px] text-zinc-600 mt-1 space-x-2">
               {currentModel.contextWindow && (
@@ -63,6 +97,19 @@ export function ConfigPanel() {
               )}
               {currentModel.maxTokens && <span>max {currentModel.maxTokens}</span>}
               <span className="font-mono">{currentModel.id}</span>
+            </div>
+          )}
+          {testResult && (
+            <div
+              className={`text-[10px] mt-1 truncate ${
+                testResult.ok ? 'text-emerald-400' : 'text-red-400'
+              }`}
+              title={testResult.error ?? testResult.sample}
+            >
+              {testResult.ok
+                ? `ok · ${testResult.latency_ms ?? '?'} ms`
+                : `failed · ${testResult.error ?? 'unknown error'}`}
+              {testResult.ok && testResult.sample ? ` · ${testResult.sample}` : ''}
             </div>
           )}
         </div>
@@ -156,6 +203,15 @@ export function ConfigPanel() {
             <div className="text-xs text-zinc-600">no run yet</div>
           )}
         </div>
+    </div>
+  )
+}
+
+export function ConfigPanel() {
+  return (
+    <aside className="w-full h-full border-l border-zinc-800 bg-zinc-950 flex flex-col overflow-auto scrollbar">
+      <div className="p-3">
+        <ModelConfigForm />
       </div>
     </aside>
   )

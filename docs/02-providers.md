@@ -9,11 +9,14 @@
 
 ```jsonc
 {
+  "includes": [
+    "../other-project/config/models.json" // 可选，支持复用其他项目里的 providers 配置
+  ],
   "providers": {
     "<provider-key>": {
       "baseUrl": "https://...",          // SDK baseURL 覆盖
       "apiKey": "sk-...",                // 该 provider 的 key
-      "api": "openai-completions" | "anthropic-messages",
+      "api": "openai-completions" | "openai-responses" | "anthropic-messages",
       "models": [
         {
           "id": "model-id-passed-to-sdk",  // 必填
@@ -29,9 +32,11 @@
 }
 ```
 
+也支持读取形如 `{ "models": { "providers": { ... } } }` 的配置文件，适合直接复用其他调试工具里的模型清单。
+
 ## API 协议
 
-只支持两种协议（涵盖 95% 的厂商和代理）：
+支持三种协议（涵盖常见厂商和代理）：
 
 ### `openai-completions`
 
@@ -46,6 +51,21 @@ Authorization: Bearer {apiKey}
 特殊处理：
 - 模型 id 匹配 `^(o[0-9]|gpt-5)` 的（比如 GPT-5、o1、o3）会自动用 `max_completion_tokens` 替代 `max_tokens`，因为新模型不接受老参数
 - 支持 `reasoning_content` 字段（DeepSeek-Reasoner 风格），会被抽成 thinking 块
+
+### `openai-responses`
+
+走 OpenAI Responses API：
+```
+POST {baseUrl}/responses
+Authorization: Bearer {apiKey}
+```
+
+适配的：OpenAI Responses 兼容服务，例如 Ark `/api/v3/responses`。
+
+特殊处理：
+- `max_tokens` 会转成 `max_output_tokens`
+- 用户图片块支持 URL 或 base64 data URL，发送时会转成 `input_image`
+- 当前 streaming 会先调用一次 Responses API，再合成前端需要的 NDJSON 事件
 
 ### `anthropic-messages`
 
@@ -85,6 +105,18 @@ curl http://localhost:3181/api/providers | jq .
 ```
 
 前端启动时拉这个填充 provider / model 下拉。
+
+## 连通性测试
+
+右侧模型选择器旁的 `Test` 会调用：
+
+```bash
+curl http://localhost:3181/api/providers/test \
+  -H 'content-type: application/json' \
+  -d '{"provider":"ark","model":"ep-..."}'
+```
+
+server 会发起一个最小文本请求，并返回 `ok`、延迟、token 用量和一小段输出样例。
 
 ## 为什么不用 .env
 

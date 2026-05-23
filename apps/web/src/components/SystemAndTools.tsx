@@ -1,129 +1,744 @@
-import { useState } from 'react'
+import { useEffect, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import type {
+  ExecToolDef,
+  McpServerConfig,
+  McpToolConfig,
+  SkillConfig,
+  Tool,
+} from '@llm-impl/shared'
 import { useStore } from '../store'
+import { toolNameForMcpTool } from '../store'
+import { ModelConfigForm } from './ConfigPanel'
+import { ModelInputPreview } from './ModelInputPreview'
+
+type SetupTab = 'model' | 'tools' | 'skills' | 'mcp' | 'input'
+
+const tabs: Array<{ id: SetupTab; label: string }> = [
+  { id: 'model', label: 'Model' },
+  { id: 'tools', label: 'Tools' },
+  { id: 'skills', label: 'Skills' },
+  { id: 'mcp', label: 'MCP' },
+  { id: 'input', label: 'Model Input' },
+]
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value))
+
+function storedHeight(key: string, fallback: number): number {
+  const raw = localStorage.getItem(key)
+  const parsed = raw ? Number(raw) : NaN
+  return Number.isFinite(parsed) ? parsed : fallback
+}
 
 export function SystemAndTools() {
-  const system = useStore((s) => s.system)
-  const setSystem = useStore((s) => s.setSystem)
   const tools = useStore((s) => s.tools)
-  const addTool = useStore((s) => s.addTool)
-  const updateTool = useStore((s) => s.updateTool)
-  const removeTool = useStore((s) => s.removeTool)
+  const [activeTab, setActiveTab] = useState<SetupTab>('model')
+  const [systemHeight, setSystemHeight] = useState(() =>
+    storedHeight('llm-impl-system-pane-height', 260),
+  )
 
-  const [openSystem, setOpenSystem] = useState(true)
-  const [openTools, setOpenTools] = useState(false)
+  useEffect(() => {
+    localStorage.setItem('llm-impl-system-pane-height', String(systemHeight))
+  }, [systemHeight])
+
+  const beginSystemResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const startY = event.clientY
+    const startHeight = systemHeight
+    const previousCursor = document.body.style.cursor
+    const previousSelect = document.body.style.userSelect
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+
+    const onMove = (moveEvent: globalThis.PointerEvent) => {
+      const delta = moveEvent.clientY - startY
+      setSystemHeight(clamp(startHeight - delta, 160, 560))
+    }
+    const onUp = () => {
+      document.body.style.cursor = previousCursor
+      document.body.style.userSelect = previousSelect
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
 
   return (
-    <div className="space-y-3">
-      <div className="rounded border border-zinc-800">
-        <button
-          className="w-full px-3 py-1.5 flex items-center justify-between text-left hover:bg-zinc-900"
-          onClick={() => setOpenSystem(!openSystem)}
-        >
-          <span className="text-xs uppercase tracking-wider text-zinc-400">
-            {openSystem ? '▾' : '▸'} system
-          </span>
-          {!openSystem && system && (
-            <span className="text-xs text-zinc-500 truncate ml-2 max-w-md">
-              {system.slice(0, 80)}
-              {system.length > 80 && '…'}
-            </span>
-          )}
-        </button>
-        {openSystem && (
-          <div className="p-3 pt-0">
-            <textarea
-              className="field-area"
-              rows={3}
-              placeholder="You are a helpful assistant..."
-              value={system}
-              onChange={(e) => setSystem(e.target.value)}
-            />
-          </div>
-        )}
+    <aside className="setup-panel">
+      <div className="setup-upper-pane">
+        <div className="setup-tabbar scrollbar" role="tablist" aria-label="Conversation setup">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              className={`setup-tab ${activeTab === tab.id ? 'is-active' : ''}`}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              {tab.label}
+              {tab.id === 'tools' && tools.length > 0 && (
+                <span className="setup-tab-count">{tools.length}</span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        <div className="setup-tab-content scrollbar">
+          {activeTab === 'model' && <ModelConfigForm />}
+          {activeTab === 'tools' && <ToolsTab />}
+          {activeTab === 'skills' && <SkillsTab />}
+          {activeTab === 'mcp' && <McpTab />}
+          {activeTab === 'input' && <ModelInputPreview defaultOpen />}
+        </div>
       </div>
 
-      <div className="rounded border border-zinc-800">
-        <button
-          className="w-full px-3 py-1.5 flex items-center justify-between text-left hover:bg-zinc-900"
-          onClick={() => setOpenTools(!openTools)}
-        >
-          <span className="text-xs uppercase tracking-wider text-zinc-400">
-            {openTools ? '▾' : '▸'} tools{' '}
-            <span className="text-zinc-600">({tools.length})</span>
-          </span>
-        </button>
-        {openTools && (
-          <div className="p-3 pt-0 space-y-2">
-            {tools.map((tool, i) => (
-              <ToolEditor
-                key={i}
-                tool={tool}
-                onChange={(patch) => updateTool(i, patch)}
-                onRemove={() => removeTool(i)}
-              />
-            ))}
-            <button className="btn" onClick={addTool}>
-              + Add tool
-            </button>
+      <div
+        className="setup-y-resize-handle"
+        onPointerDown={beginSystemResize}
+      />
+      <section
+        className="setup-system-pane scrollbar"
+        style={{ height: systemHeight }}
+      >
+        <SystemPromptTab />
+      </section>
+    </aside>
+  )
+}
+
+function SystemPromptTab() {
+  const system = useStore((s) => s.system)
+  const setSystem = useStore((s) => s.setSystem)
+
+  return (
+    <div className="setup-section setup-system-section">
+      <div className="label mb-2">system prompt</div>
+      <textarea
+        className="field-area setup-system-textarea"
+        placeholder="You are a helpful assistant..."
+        value={system}
+        onChange={(e) => setSystem(e.target.value)}
+      />
+    </div>
+  )
+}
+
+function ToolsTab() {
+  const tools = useStore((s) => s.tools)
+  const execTools = useStore((s) => s.execTools)
+  const setBuiltinToolEnabled = useStore((s) => s.setBuiltinToolEnabled)
+  const removeTool = useStore((s) => s.removeTool)
+  const refreshExecTools = useStore((s) => s.refreshExecTools)
+  const [refreshing, setRefreshing] = useState(false)
+
+  const selectedNames = new Set(tools.map((tool) => tool.name))
+  const execToolNames = new Set(execTools.map((tool) => tool.name))
+  const legacyTools = tools
+    .map((tool, index) => ({ tool, index }))
+    .filter(({ tool }) => !execToolNames.has(tool.name))
+  const enabledCount = execTools.filter((tool) => selectedNames.has(tool.name)).length
+
+  const refresh = async () => {
+    setRefreshing(true)
+    try {
+      await refreshExecTools()
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  return (
+    <div className="setup-section space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="label">built-in tools ({enabledCount}/{execTools.length})</div>
+          <div className="mt-1 text-xs text-zinc-500">
+            Choose server-runnable tools to expose to the model.
           </div>
-        )}
+        </div>
+        <button className="btn" disabled={refreshing} onClick={refresh}>
+          {refreshing ? 'Refreshing...' : 'Refresh'}
+        </button>
+      </div>
+
+      {execTools.length === 0 && (
+        <div className="setup-empty-state">No built-in tools loaded</div>
+      )}
+
+      {execTools.length > 0 && (
+        <div className="space-y-2">
+          {execTools.map((tool) => (
+            <BuiltinToolRow
+              key={tool.name}
+              tool={tool}
+              enabled={selectedNames.has(tool.name)}
+              onToggle={(enabled) => setBuiltinToolEnabled(tool.name, enabled)}
+            />
+          ))}
+        </div>
+      )}
+
+      {legacyTools.length > 0 && (
+        <div className="space-y-2 pt-2 border-t border-zinc-800">
+          <div>
+            <div className="label">manual-only tools ({legacyTools.length})</div>
+            <div className="mt-1 text-xs text-zinc-500">
+              These came from older case JSON and are sent to the model, but have no
+              built-in executor.
+            </div>
+          </div>
+          {legacyTools.map(({ tool, index }) => (
+            <LegacyToolCard
+              key={`${tool.name}-${index}`}
+              tool={tool}
+              onRemove={() => removeTool(index)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function BuiltinToolRow({
+  tool,
+  enabled,
+  onToggle,
+}: {
+  tool: ExecToolDef
+  enabled: boolean
+  onToggle: (enabled: boolean) => void
+}) {
+  const [showSchema, setShowSchema] = useState(false)
+
+  return (
+    <div className={`tool-library-row ${enabled ? 'is-enabled' : ''}`}>
+      <div className="flex items-start justify-between gap-2">
+        <label className="flex min-w-0 flex-1 items-start gap-2 text-xs">
+          <input
+            className="mt-0.5"
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => onToggle(e.target.checked)}
+          />
+          <span className="min-w-0">
+            <span className="block truncate font-mono text-zinc-200">{tool.name}</span>
+            <span className="mt-1 block text-zinc-500">{tool.description}</span>
+          </span>
+        </label>
+        <span className={`tool-status ${enabled ? 'is-enabled' : ''}`}>
+          {enabled ? 'enabled' : 'off'}
+        </span>
+      </div>
+      <button
+        className="btn-ghost mt-2 text-[10px] text-zinc-500"
+        onClick={() => setShowSchema((value) => !value)}
+      >
+        {showSchema ? 'Hide schema' : 'Show schema'}
+      </button>
+      {showSchema && <SchemaPreview schema={tool.input_schema} />}
+    </div>
+  )
+}
+
+function LegacyToolCard({
+  tool,
+  onRemove,
+}: {
+  tool: Tool
+  onRemove: () => void
+}) {
+  const [showSchema, setShowSchema] = useState(false)
+
+  return (
+    <div className="tool-library-row is-legacy">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate font-mono text-xs text-zinc-200">{tool.name}</div>
+          {tool.description && (
+            <div className="mt-1 text-xs text-zinc-500">{tool.description}</div>
+          )}
+        </div>
+        <button className="btn-danger" onClick={onRemove} title="Remove manual-only tool">
+          x
+        </button>
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <span className="text-[10px] text-amber-400">manual result required</span>
+        <button
+          className="btn-ghost text-[10px] text-zinc-500"
+          onClick={() => setShowSchema((value) => !value)}
+        >
+          {showSchema ? 'Hide schema' : 'Show schema'}
+        </button>
+      </div>
+      {showSchema && <SchemaPreview schema={tool.input_schema} />}
+    </div>
+  )
+}
+
+function SchemaPreview({ schema }: { schema: Record<string, unknown> }) {
+  return (
+    <pre className="tool-schema-preview scrollbar">
+      {JSON.stringify(schema, null, 2)}
+    </pre>
+  )
+}
+
+function SkillsTab() {
+  const skills = useStore((s) => s.skills)
+  const skillRoots = useStore((s) => s.skillRoots)
+  const setSkillRoots = useStore((s) => s.setSkillRoots)
+  const refreshSkills = useStore((s) => s.refreshSkills)
+  const updateSkill = useStore((s) => s.updateSkill)
+  const removeSkill = useStore((s) => s.removeSkill)
+  const [rootsText, setRootsText] = useState(() => skillRoots.join('\n'))
+  const [refreshing, setRefreshing] = useState(false)
+  const enabledCount = skills.filter((skill) => skill.enabled).length
+
+  useEffect(() => {
+    setRootsText((current) => {
+      const normalized = current
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .join('\n')
+      const next = skillRoots.join('\n')
+      return normalized === next ? current : next
+    })
+  }, [skillRoots])
+
+  const applyRoots = (value: string) => {
+    setRootsText(value)
+    setSkillRoots(
+      value
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean),
+    )
+  }
+
+  const refresh = async () => {
+    setRefreshing(true)
+    try {
+      await refreshSkills()
+    } catch (e) {
+      alert(`Skill discovery failed: ${(e as Error).message}`)
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  return (
+    <div className="setup-section space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="label">skills ({enabledCount}/{skills.length})</div>
+          <div className="mt-1 text-xs text-zinc-500">
+            SKILL.md packages are exposed through the generated load_skill tool.
+          </div>
+        </div>
+        <button className="btn" disabled={refreshing} onClick={refresh}>
+          {refreshing ? 'Discovering...' : 'Discover'}
+        </button>
+      </div>
+
+      <div>
+        <div className="label mb-1">skill roots</div>
+        <textarea
+          className="field-area font-mono text-xs"
+          rows={3}
+          placeholder="/absolute/path/to/skills&#10;leave empty for server defaults"
+          value={rootsText}
+          onChange={(e) => applyRoots(e.target.value)}
+        />
+        <div className="mt-1 text-[10px] text-zinc-600">
+          One directory per line. Empty uses server defaults such as this repo's
+          skills folder and the sibling rule_agent skills folder.
+        </div>
+      </div>
+
+      {skills.length === 0 && (
+        <div className="setup-empty-state">No SKILL.md packages discovered</div>
+      )}
+      {skills.map((skill, i) => (
+        <SkillCatalogRow
+          key={skill.id}
+          skill={skill}
+          onChange={(patch) => updateSkill(i, patch)}
+          onRemove={() => removeSkill(i)}
+        />
+      ))}
+    </div>
+  )
+}
+
+function McpTab() {
+  const servers = useStore((s) => s.mcpServers)
+  const addMcpServer = useStore((s) => s.addMcpServer)
+  const updateMcpServer = useStore((s) => s.updateMcpServer)
+  const removeMcpServer = useStore((s) => s.removeMcpServer)
+  const updateMcpTool = useStore((s) => s.updateMcpTool)
+  const refreshMcpServerTools = useStore((s) => s.refreshMcpServerTools)
+  const [busyIndex, setBusyIndex] = useState<number | null>(null)
+
+  return (
+    <div className="setup-section space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="label">mcp servers ({servers.length})</div>
+        <button className="btn" onClick={addMcpServer}>
+          + Add server
+        </button>
+      </div>
+      {servers.length === 0 && (
+        <div className="setup-empty-state">No MCP servers configured</div>
+      )}
+      {servers.map((server, i) => (
+        <McpServerEditor
+          key={server.id}
+          server={server}
+          busy={busyIndex === i}
+          onChange={(patch) => updateMcpServer(i, patch)}
+          onRemove={() => removeMcpServer(i)}
+          onFetchTools={async () => {
+            setBusyIndex(i)
+            try {
+              await refreshMcpServerTools(i)
+            } catch (e) {
+              alert(`MCP tools failed: ${(e as Error).message}`)
+            } finally {
+              setBusyIndex(null)
+            }
+          }}
+          onToolChange={(toolIdx, patch) => updateMcpTool(i, toolIdx, patch)}
+        />
+      ))}
+    </div>
+  )
+}
+
+function SkillCatalogRow({
+  skill,
+  onChange,
+  onRemove,
+}: {
+  skill: SkillConfig
+  onChange: (patch: Partial<SkillConfig>) => void
+  onRemove: () => void
+}) {
+  return (
+    <div className={`tool-library-row ${skill.enabled ? 'is-enabled' : ''}`}>
+      <div className="flex items-start justify-between gap-2">
+        <label className="flex min-w-0 flex-1 items-start gap-2 text-xs">
+          <input
+            className="mt-0.5"
+            type="checkbox"
+            checked={skill.enabled}
+            onChange={(e) => onChange({ enabled: e.target.checked })}
+          />
+          <span className="min-w-0">
+            <span className="block truncate font-mono text-zinc-200">{skill.name}</span>
+            <span className="mt-1 block text-zinc-500">
+              {skill.description || 'No description'}
+            </span>
+          </span>
+        </label>
+        <span className={`tool-status ${skill.enabled ? 'is-enabled' : ''}`}>
+          {skill.enabled ? 'enabled' : 'off'}
+        </span>
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-zinc-600">
+        <span className="truncate">
+          {skill.dirPath ? skill.dirPath : skill.source ?? 'manual'}
+        </span>
+        <button className="btn-danger" onClick={onRemove} title="Remove skill">
+          x
+        </button>
+      </div>
+      <div className="mt-2 text-[10px] text-zinc-500">
+        model tool: <span className="font-mono">load_skill</span>
       </div>
     </div>
   )
 }
 
-function ToolEditor({
-  tool,
+function McpServerEditor({
+  server,
+  busy,
   onChange,
   onRemove,
+  onFetchTools,
+  onToolChange,
 }: {
-  tool: { name: string; description?: string; input_schema: Record<string, unknown> }
-  onChange: (patch: { name?: string; description?: string; input_schema?: Record<string, unknown> }) => void
+  server: McpServerConfig
+  busy: boolean
+  onChange: (patch: Partial<McpServerConfig>) => void
   onRemove: () => void
+  onFetchTools: () => Promise<void>
+  onToolChange: (toolIdx: number, patch: Partial<McpToolConfig>) => void
 }) {
-  const [schemaText, setSchemaText] = useState(() => JSON.stringify(tool.input_schema, null, 2))
-  const [schemaError, setSchemaError] = useState<string | null>(null)
+  const transport = server.transport ?? 'stdio'
+  const isHttp = transport === 'streamablehttp'
+  const canFetch = isHttp
+    ? Boolean(server.url?.trim())
+    : Boolean(server.command?.trim())
+  const [argsText, setArgsText] = useState(() => (server.args ?? []).join('\n'))
+  const [envText, setEnvText] = useState(() =>
+    JSON.stringify(server.env ?? {}, null, 2),
+  )
+  const [headersText, setHeadersText] = useState(() =>
+    JSON.stringify(server.headers ?? {}, null, 2),
+  )
+  const [envError, setEnvError] = useState<string | null>(null)
+  const [headersError, setHeadersError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setArgsText((current) => {
+      const normalized = current
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .join('\n')
+      const next = (server.args ?? []).join('\n')
+      return normalized === next ? current : next
+    })
+  }, [server.args])
+
+  useEffect(() => {
+    setEnvText((current) => {
+      try {
+        if (JSON.stringify(JSON.parse(current || '{}')) === JSON.stringify(server.env ?? {})) {
+          return current
+        }
+      } catch {
+        return current
+      }
+      setEnvError(null)
+      return JSON.stringify(server.env ?? {}, null, 2)
+    })
+  }, [server.env])
+
+  useEffect(() => {
+    setHeadersText((current) => {
+      try {
+        if (
+          JSON.stringify(JSON.parse(current || '{}')) ===
+          JSON.stringify(server.headers ?? {})
+        ) {
+          return current
+        }
+      } catch {
+        return current
+      }
+      setHeadersError(null)
+      return JSON.stringify(server.headers ?? {}, null, 2)
+    })
+  }, [server.headers])
+
+  const setTransport = (nextTransport: McpServerConfig['transport']) => {
+    onChange({ transport: nextTransport, tools: [] })
+  }
 
   return (
     <div className="rounded border border-zinc-800 bg-zinc-950 p-2 space-y-2">
       <div className="flex items-center gap-2">
         <input
           className="field flex-1"
-          placeholder="tool_name"
-          value={tool.name}
+          placeholder="server name"
+          value={server.name}
           onChange={(e) => onChange({ name: e.target.value })}
         />
-        <button className="btn-danger" onClick={onRemove} title="Remove tool">
-          ✕
+        <button className="btn-danger" onClick={onRemove} title="Remove MCP server">
+          x
         </button>
       </div>
-      <input
-        className="field"
-        placeholder="description (optional)"
-        value={tool.description ?? ''}
-        onChange={(e) => onChange({ description: e.target.value })}
-      />
-      <div>
-        <div className="label mb-1">input_schema (JSON)</div>
-        <textarea
-          className={`field-area font-mono text-xs ${schemaError ? 'border-red-700' : ''}`}
-          rows={6}
-          value={schemaText}
-          onChange={(e) => {
-            const v = e.target.value
-            setSchemaText(v)
-            try {
-              const parsed = JSON.parse(v)
-              setSchemaError(null)
-              onChange({ input_schema: parsed })
-            } catch (err) {
-              setSchemaError((err as Error).message)
-            }
-          }}
+      <label className="flex items-center gap-2 text-xs text-zinc-400">
+        <input
+          type="checkbox"
+          checked={server.enabled}
+          onChange={(e) => onChange({ enabled: e.target.checked })}
         />
-        {schemaError && (
-          <div className="text-xs text-red-400 mt-1">{schemaError}</div>
+        enabled
+      </label>
+
+      <div>
+        <div className="label mb-1">transport</div>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            className={`btn ${transport === 'stdio' ? 'btn-primary' : ''}`}
+            onClick={() => setTransport('stdio')}
+          >
+            stdio
+          </button>
+          <button
+            className={`btn ${transport === 'streamablehttp' ? 'btn-primary' : ''}`}
+            onClick={() => setTransport('streamablehttp')}
+          >
+            streamablehttp
+          </button>
+        </div>
+      </div>
+
+      {isHttp ? (
+        <>
+          <input
+            className="field"
+            placeholder="https://example.com/mcp"
+            value={server.url ?? ''}
+            onChange={(e) => onChange({ url: e.target.value })}
+          />
+          <div>
+            <div className="label mb-1">headers (JSON)</div>
+            <textarea
+              className={`field-area font-mono text-xs ${headersError ? 'border-red-700' : ''}`}
+              rows={4}
+              value={headersText}
+              onChange={(e) => {
+                const value = e.target.value
+                setHeadersText(value)
+                try {
+                  const parsed = JSON.parse(value || '{}')
+                  setHeadersError(null)
+                  const headers =
+                    parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                      ? Object.fromEntries(
+                          Object.entries(parsed).map(([key, childValue]) => [
+                            key,
+                            String(childValue),
+                          ]),
+                        )
+                      : {}
+                  onChange({ headers })
+                } catch (err) {
+                  setHeadersError((err as Error).message)
+                }
+              }}
+            />
+            {headersError && (
+              <div className="text-xs text-red-400 mt-1">{headersError}</div>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <input
+            className="field"
+            placeholder="command"
+            value={server.command ?? ''}
+            onChange={(e) => onChange({ command: e.target.value })}
+          />
+          <div>
+            <div className="label mb-1">args</div>
+            <textarea
+              className="field-area font-mono text-xs"
+              rows={3}
+              value={argsText}
+              onChange={(e) => {
+                const value = e.target.value
+                setArgsText(value)
+                onChange({
+                  args: value
+                    .split('\n')
+                    .map((line) => line.trim())
+                    .filter(Boolean),
+                })
+              }}
+            />
+          </div>
+          <div>
+            <div className="label mb-1">env (JSON)</div>
+            <textarea
+              className={`field-area font-mono text-xs ${envError ? 'border-red-700' : ''}`}
+              rows={4}
+              value={envText}
+              onChange={(e) => {
+                const value = e.target.value
+                setEnvText(value)
+                try {
+                  const parsed = JSON.parse(value || '{}')
+                  setEnvError(null)
+                  const env =
+                    parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                      ? Object.fromEntries(
+                          Object.entries(parsed).map(([key, childValue]) => [
+                            key,
+                            String(childValue),
+                          ]),
+                        )
+                      : {}
+                  onChange({ env })
+                } catch (err) {
+                  setEnvError((err as Error).message)
+                }
+              }}
+            />
+            {envError && <div className="text-xs text-red-400 mt-1">{envError}</div>}
+          </div>
+        </>
+      )}
+
+      <div className="flex items-center gap-2">
+        <input
+          className="field w-28"
+          type="number"
+          min={1000}
+          value={server.timeout_ms ?? 15000}
+          onChange={(e) => onChange({ timeout_ms: Number(e.target.value) })}
+        />
+        <button
+          className="btn flex-1"
+          disabled={!canFetch || busy || Boolean(envError || headersError)}
+          onClick={onFetchTools}
+        >
+          {busy ? 'Fetching…' : 'Fetch tools'}
+        </button>
+      </div>
+      <div className="space-y-1">
+        <div className="label">tools ({server.tools.length})</div>
+        {server.tools.length === 0 && (
+          <div className="setup-empty-state">No tools fetched</div>
         )}
+        {server.tools.map((tool, i) => (
+          <McpToolRow
+            key={tool.name}
+            server={server}
+            tool={tool}
+            onChange={(patch) => onToolChange(i, patch)}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function McpToolRow({
+  server,
+  tool,
+  onChange,
+}: {
+  server: McpServerConfig
+  tool: McpToolConfig
+  onChange: (patch: Partial<McpToolConfig>) => void
+}) {
+  return (
+    <div className="rounded border border-zinc-800 bg-zinc-950/50 p-2">
+      <label className="flex items-center gap-2 text-xs">
+        <input
+          type="checkbox"
+          checked={tool.enabled}
+          onChange={(e) => onChange({ enabled: e.target.checked })}
+        />
+        <span className="font-mono text-zinc-300 truncate">{tool.name}</span>
+      </label>
+      {tool.description && (
+        <div className="mt-1 text-[10px] text-zinc-500">
+          {tool.description}
+        </div>
+      )}
+      <div className="mt-1 text-[10px] text-zinc-600 truncate">
+        tool: <span className="font-mono">{toolNameForMcpTool(server, tool)}</span>
       </div>
     </div>
   )
