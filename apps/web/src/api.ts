@@ -10,6 +10,7 @@ import type {
   McpCallToolResponse,
   McpListToolsResponse,
   McpServerConfig,
+  SandboxConfig,
   SkillConfig,
   SkillListResponse,
 } from '@llm-impl/shared'
@@ -114,11 +115,12 @@ export async function listExecTools(): Promise<ExecToolDef[]> {
 export async function execTool(
   name: string,
   input: unknown,
+  sandbox?: SandboxConfig | null,
 ): Promise<ExecToolResponse> {
   const res = await fetch('/api/exec-tool', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name, input }),
+    body: JSON.stringify({ name, input, ...(sandbox && { sandbox }) }),
   })
   if (!res.ok) throw new Error(`exec-tool failed: ${res.status}`)
   return res.json()

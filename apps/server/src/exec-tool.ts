@@ -1,21 +1,41 @@
 import { execFile, spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
-import type { ExecToolDef, ExecToolResponse } from '@llm-impl/shared'
+import { fileURLToPath } from 'node:url'
+import type { ExecToolDef, ExecToolResponse, SandboxConfig } from '@llm-impl/shared'
 
 type ToolImpl = ExecToolDef & {
-  handler: (input: Record<string, unknown>) => Promise<ExecToolResponse>
+  handler: (
+    input: Record<string, unknown>,
+    context: ToolContext,
+  ) => Promise<ExecToolResponse>
 }
 
 type CommandStatus = 'success' | 'failed' | 'timeout' | 'blocked'
+type SandboxMode = 'workspace-write' | 'read-only'
+type SandboxNetwork = 'blocked' | 'allowed'
+type ToolContext = {
+  sandbox?: SandboxConfig
+}
+type ResolvedSandboxConfig = {
+  enabled: boolean
+  mode: SandboxMode
+  network: SandboxNetwork
+  allowedRoots: string[]
+  writableRoots: string[]
+  label?: string
+}
 
 const MAX_COMMAND_TIMEOUT_MS = 600_000
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000
 const MAX_COMMAND_OUTPUT_CHARS = 64 * 1024
 const MAX_FILE_SIZE = 256 * 1024
+const MAX_WRITE_FILE_BYTES = 512 * 1024
 const MAX_FETCH_CHARS = 128 * 1024
 const DEFAULT_FETCH_CHARS = 32 * 1024
 const FETCH_TIMEOUT_MS = 15_000
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const NOISE_DIRS = new Set([
   'node_modules',
   '.git',
@@ -44,6 +64,43 @@ const DANGEROUS_COMMAND_PATTERNS = [
   /\bchown\s+-R\s+.*\s+\/\s*$/,
 ]
 
+const splitPathList = (value: string | undefined): string[] =>
+  value
+    ? value
+        .split(path.delimiter)
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    : []
+
+const defaultAllowedRootCandidates = (extraRoots: string[] = []): string[] => [
+  REPO_ROOT,
+  path.resolve(REPO_ROOT, 'skills'),
+  path.resolve(REPO_ROOT, '../rule_agent/skills'),
+  ...splitPathList(process.env.SKILL_ROOTS),
+  ...splitPathList(process.env.LLM_IMPL_ALLOWED_ROOTS),
+  ...extraRoots,
+]
+
+const defaultReadOnlyRoots = (): string[] => [
+  '/bin',
+  '/sbin',
+  '/usr',
+  '/System',
+  '/Library',
+  '/opt',
+  ...splitPathList(process.env.PATH),
+]
+
+const defaultTempWriteRoots = (): string[] => [
+  os.tmpdir(),
+  '/tmp',
+  '/private/tmp',
+  '/var/tmp',
+  '/private/var/tmp',
+  '/var/folders',
+  '/private/var/folders',
+]
+
 const truncateMiddle = (text: string, maxChars: number): string => {
   if (text.length <= maxChars) return text
   const keep = Math.floor(maxChars / 2)
@@ -52,6 +109,11 @@ const truncateMiddle = (text: string, maxChars: number): string => {
 
 const asString = (value: unknown): string =>
   typeof value === 'string' ? value : ''
+
+const asStringArray = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : []
 
 const asPositiveNumber = (
   value: unknown,
@@ -71,11 +133,166 @@ const asNonNegativeNumber = (
     ? Math.min(value, max)
     : fallback
 
+function sandboxModeFrom(value: unknown): SandboxMode | undefined {
+  return value === 'read-only' || value === 'workspace-write'
+    ? value
+    : undefined
+}
+
+function sandboxNetworkFrom(value: unknown): SandboxNetwork | undefined {
+  return value === 'allowed' || value === 'blocked' ? value : undefined
+}
+
+function resolveSandboxConfig(
+  input: Record<string, unknown>,
+  context: ToolContext,
+): ResolvedSandboxConfig {
+  const caseSandbox = context.sandbox ?? {}
+  return {
+    enabled:
+      typeof input.sandbox_enabled === 'boolean'
+        ? input.sandbox_enabled
+        : caseSandbox.enabled !== false,
+    mode:
+      sandboxModeFrom(input.sandbox_mode) ??
+      caseSandbox.mode ??
+      'workspace-write',
+    network:
+      sandboxNetworkFrom(input.sandbox_network) ??
+      caseSandbox.network ??
+      'blocked',
+    allowedRoots: [
+      ...(caseSandbox.allowedRoots ?? []),
+      ...asStringArray(input.sandbox_allowed_roots),
+    ],
+    writableRoots: [
+      ...(caseSandbox.writableRoots ?? []),
+      ...asStringArray(input.sandbox_writable_roots),
+    ],
+    label:
+      asString(input.sandbox_label).trim() ||
+      caseSandbox.label ||
+      undefined,
+  }
+}
+
 async function directoryExists(dir: string): Promise<boolean> {
   try {
     return (await fs.stat(dir)).isDirectory()
   } catch {
     return false
+  }
+}
+
+async function realExistingPath(targetPath: string): Promise<string | null> {
+  try {
+    return await fs.realpath(targetPath)
+  } catch {
+    return null
+  }
+}
+
+async function existingDirectories(paths: string[]): Promise<string[]> {
+  const roots: string[] = []
+  for (const entry of paths) {
+    const resolved = path.resolve(entry)
+    const real = await realExistingPath(resolved)
+    if (real && (await directoryExists(real))) roots.push(real)
+    if (real && (await directoryExists(resolved))) roots.push(resolved)
+  }
+  return [...new Set(roots)]
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child)
+  return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
+async function allowedRoots(extraRoots: string[] = []): Promise<string[]> {
+  return existingDirectories(defaultAllowedRootCandidates(extraRoots))
+}
+
+async function writableRootsForSandbox(
+  sandbox: ResolvedSandboxConfig,
+): Promise<string[]> {
+  const rootCandidates = [
+    ...defaultTempWriteRoots(),
+    ...sandbox.writableRoots,
+    ...(sandbox.mode === 'workspace-write'
+      ? defaultAllowedRootCandidates(sandbox.allowedRoots)
+      : []),
+  ]
+  const lexicalRoots = rootCandidates.map((entry) => path.resolve(entry))
+  const realRoots = await existingDirectories(rootCandidates)
+  return [...new Set([...realRoots, ...lexicalRoots])]
+}
+
+async function requireAllowedPath(
+  targetPath: string,
+  label: string,
+  extraAllowedRoots: string[] = [],
+): Promise<{ ok: true; realPath: string; roots: string[] } | { ok: false; response: ExecToolResponse }> {
+  const realPath = await realExistingPath(path.resolve(targetPath))
+  if (!realPath) {
+    return {
+      ok: false,
+      response: {
+        content: `[error] ${label} does not exist: ${targetPath}`,
+        is_error: true,
+      },
+    }
+  }
+  const roots = await allowedRoots(extraAllowedRoots)
+  if (roots.some((root) => isPathInside(root, realPath))) {
+    return { ok: true, realPath, roots }
+  }
+  return {
+    ok: false,
+    response: {
+      content: [
+        `[sandbox] blocked ${label}: ${realPath}`,
+        'Allowed roots:',
+        ...roots.map((root) => `- ${root}`),
+        '',
+        'Set LLM_IMPL_ALLOWED_ROOTS to add more trusted roots.',
+      ].join('\n'),
+      is_error: true,
+    },
+  }
+}
+
+async function requireWritablePath(
+  targetPath: string,
+  label: string,
+  sandbox: ResolvedSandboxConfig,
+): Promise<{ ok: true; resolvedPath: string; roots: string[] } | { ok: false; response: ExecToolResponse }> {
+  const resolvedPath = path.resolve(targetPath)
+  const roots = await writableRootsForSandbox(sandbox)
+  const existingTarget = await realExistingPath(resolvedPath)
+  const parentPath = path.dirname(resolvedPath)
+  const existingParent = await realExistingPath(parentPath)
+  const checkPath =
+    existingTarget ??
+    (existingParent
+      ? path.join(existingParent, path.basename(resolvedPath))
+      : resolvedPath)
+
+  if (roots.some((root) => isPathInside(root, checkPath))) {
+    return { ok: true, resolvedPath, roots }
+  }
+
+  return {
+    ok: false,
+    response: {
+      content: [
+        `[sandbox] blocked ${label}: ${resolvedPath}`,
+        'Writable roots:',
+        ...roots.map((root) => `- ${root}`),
+        '',
+        'Use case sandbox.writableRoots or per-call sandbox_writable_roots to add a writable root.',
+      ].join('\n'),
+      is_error: true,
+    },
   }
 }
 
@@ -99,6 +316,7 @@ function formatRunCommandResult(payload: {
   status: CommandStatus
   command: string
   cwd: string
+  sandbox?: string
   stdout?: string
   stderr?: string
   exitCode?: number | null
@@ -111,6 +329,7 @@ function formatRunCommandResult(payload: {
     `command: ${payload.command}`,
     `cwd: ${payload.cwd}`,
   ]
+  if (payload.sandbox) rows.push(`sandbox: ${payload.sandbox}`)
   if (typeof payload.exitCode === 'number') rows.push(`exit_code: ${payload.exitCode}`)
   if (payload.signal) rows.push(`signal: ${payload.signal}`)
   if (payload.note) rows.push(`note: ${payload.note}`)
@@ -119,20 +338,150 @@ function formatRunCommandResult(payload: {
   return rows.join('\n')
 }
 
+function sandboxString(value: string): string {
+  return JSON.stringify(value)
+}
+
+async function commandReferenceRoots(roots: string[]): Promise<string[]> {
+  return existingDirectories([
+    ...defaultReadOnlyRoots(),
+    ...defaultTempWriteRoots(),
+    ...roots,
+  ])
+}
+
+function isAllowedDevicePath(targetPath: string): boolean {
+  return targetPath === '/dev/null' || targetPath.startsWith('/dev/fd/')
+}
+
+function extractAbsolutePathRefs(command: string): string[] {
+  const refs: string[] = []
+  const pattern = /(?:^|[\s"'=])((?:\/[^\s"'`$;&|<>()\[\]{}]+)+)/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(command))) {
+    if (match[1]) refs.push(match[1])
+  }
+  return refs
+}
+
+async function findDisallowedCommandPathRef(
+  command: string,
+  roots: string[],
+): Promise<string | null> {
+  const referenceRoots = await commandReferenceRoots(roots)
+  for (const ref of extractAbsolutePathRefs(command)) {
+    if (ref.startsWith('//')) continue
+    const resolved = (await realExistingPath(ref)) ?? path.resolve(ref)
+    if (isAllowedDevicePath(resolved)) continue
+    if (!referenceRoots.some((root) => isPathInside(root, resolved))) {
+      return resolved
+    }
+  }
+  return null
+}
+
+async function buildMacSandboxProfile(
+  cwd: string,
+  sandbox: ResolvedSandboxConfig,
+): Promise<string> {
+  const writeRoots = await existingDirectories([
+    ...defaultTempWriteRoots(),
+    ...(sandbox.mode === 'workspace-write' ? [cwd] : []),
+    ...sandbox.writableRoots,
+  ])
+  const writeRules = writeRoots
+    .map((root) => `(subpath ${sandboxString(root)})`)
+    .join('\n    ')
+
+  return [
+    '(version 1)',
+    '(allow default)',
+    sandbox.network === 'blocked' ? '(deny network*)' : '',
+    '(deny file-write*)',
+    '(allow file-write* (literal "/dev/null"))',
+    writeRules ? `(allow file-write*\n    ${writeRules})` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+async function commandSpawnConfig(
+  command: string,
+  cwd: string,
+  sandbox: ResolvedSandboxConfig,
+): Promise<{ file: string; args: string[]; label: string }> {
+  const sandboxExec = '/usr/bin/sandbox-exec'
+  const configLabel = sandbox.label ? `:${sandbox.label}` : ''
+  if (sandbox.enabled && process.platform === 'darwin' && (await fileExists(sandboxExec))) {
+    const profile = await buildMacSandboxProfile(cwd, sandbox)
+    return {
+      file: sandboxExec,
+      args: ['-p', profile, '/bin/sh', '-c', command],
+      label: `macos-sandbox-exec:${sandbox.mode}:network-${sandbox.network}${configLabel}`,
+    }
+  }
+  return {
+    file: '/bin/sh',
+    args: ['-c', command],
+    label: `${sandbox.enabled ? 'soft-path-guard' : 'sandbox-disabled'}:${sandbox.mode}:network-${sandbox.network}${configLabel}`,
+  }
+}
+
+function commandEnv(): NodeJS.ProcessEnv {
+  const keys = [
+    'PATH',
+    'LANG',
+    'LC_ALL',
+    'LC_CTYPE',
+    'TERM',
+    'TMPDIR',
+    'HOME',
+    'USER',
+    'SHELL',
+    'PYTHONPATH',
+    'NODE_PATH',
+  ]
+  const env: NodeJS.ProcessEnv = {}
+  for (const key of keys) {
+    if (process.env[key] !== undefined) env[key] = process.env[key]
+  }
+  env.LANG = env.LANG ?? 'en_US.UTF-8'
+  env.TMPDIR = env.TMPDIR ?? os.tmpdir()
+  return env
+}
+
 async function runCommandHandler(
   input: Record<string, unknown>,
+  context: ToolContext,
 ): Promise<ExecToolResponse> {
   const command = asString(input.command).trim()
   if (!command) return { content: 'command is required', is_error: true }
+  const sandbox = resolveSandboxConfig(input, context)
 
   const requestedCwd = asString(input.working_directory).trim()
   const cwd = requestedCwd ? path.resolve(requestedCwd) : process.cwd()
-  if (!(await directoryExists(cwd))) {
+  const allowedCwd = await requireAllowedPath(
+    cwd,
+    'working_directory',
+    [...sandbox.allowedRoots, ...sandbox.writableRoots],
+  )
+  if (!allowedCwd.ok) {
+    return {
+      content: formatRunCommandResult({
+        status: 'blocked',
+        command,
+        cwd,
+        note: allowedCwd.response.content,
+      }),
+      is_error: true,
+    }
+  }
+  if (!(await directoryExists(allowedCwd.realPath))) {
     return {
       content: formatRunCommandResult({
         status: 'failed',
         command,
-        cwd,
+        cwd: allowedCwd.realPath,
         note: 'working_directory does not exist or is not a directory',
       }),
       is_error: true,
@@ -151,17 +500,37 @@ async function runCommandHandler(
       is_error: true,
     }
   }
+  const disallowedPathRef = await findDisallowedCommandPathRef(
+    command,
+    [...allowedCwd.roots, ...sandbox.allowedRoots, ...sandbox.writableRoots],
+  )
+  if (disallowedPathRef) {
+    return {
+      content: formatRunCommandResult({
+        status: 'blocked',
+        command,
+        cwd: allowedCwd.realPath,
+        note: `command references a path outside allowed roots: ${disallowedPathRef}`,
+      }),
+      is_error: true,
+    }
+  }
 
   const timeoutMs = asPositiveNumber(
     input.timeout_ms,
     DEFAULT_COMMAND_TIMEOUT_MS,
     MAX_COMMAND_TIMEOUT_MS,
   )
+  const spawnConfig = await commandSpawnConfig(
+    command,
+    allowedCwd.realPath,
+    sandbox,
+  )
 
   return new Promise<ExecToolResponse>((resolve) => {
-    const child = spawn('/bin/sh', ['-c', command], {
-      cwd,
-      env: { ...process.env, LANG: process.env.LANG ?? 'en_US.UTF-8' },
+    const child = spawn(spawnConfig.file, spawnConfig.args, {
+      cwd: allowedCwd.realPath,
+      env: commandEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -180,7 +549,8 @@ async function runCommandHandler(
         content: formatRunCommandResult({
           status: 'timeout',
           command,
-          cwd,
+          cwd: allowedCwd.realPath,
+          sandbox: spawnConfig.label,
           stdout: stdout.trimEnd() || undefined,
           stderr: stderr.trimEnd() || undefined,
           note: `process killed after ${timeoutMs}ms`,
@@ -206,7 +576,8 @@ async function runCommandHandler(
         content: formatRunCommandResult({
           status: ok ? 'success' : 'failed',
           command,
-          cwd,
+          cwd: allowedCwd.realPath,
+          sandbox: spawnConfig.label,
           stdout: stdout.trimEnd() || '(no output)',
           stderr: stderr.trimEnd() || undefined,
           exitCode: code,
@@ -307,13 +678,21 @@ async function fetchUrlHandler(
 
 async function readFileHandler(
   input: Record<string, unknown>,
+  context: ToolContext,
 ): Promise<ExecToolResponse> {
   const filePath = asString(input.path).trim()
   if (!filePath) return { content: 'path is required', is_error: true }
-  if (!(await fileExists(filePath))) {
+  const sandbox = resolveSandboxConfig(input, context)
+  const allowedPath = await requireAllowedPath(
+    filePath,
+    'read_file path',
+    [...sandbox.allowedRoots, ...sandbox.writableRoots],
+  )
+  if (!allowedPath.ok) return allowedPath.response
+  if (!(await fileExists(allowedPath.realPath))) {
     return { content: `[error] File not found: ${filePath}`, is_error: true }
   }
-  const stat = await fs.stat(filePath)
+  const stat = await fs.stat(allowedPath.realPath)
   const limit =
     typeof input.limit === 'number' && Number.isFinite(input.limit) && input.limit > 0
       ? Math.min(Math.floor(input.limit), 5_000)
@@ -329,7 +708,7 @@ async function readFileHandler(
       ? Math.max(1, Math.floor(input.offset))
       : 1
   try {
-    const content = await fs.readFile(filePath, 'utf8')
+    const content = await fs.readFile(allowedPath.realPath, 'utf8')
     const lines = content.split('\n')
     const start = offset - 1
     const end = limit ? start + limit : lines.length
@@ -341,6 +720,73 @@ async function readFileHandler(
     }
   } catch (e) {
     return { content: `[error] ${(e as Error).message}`, is_error: true }
+  }
+}
+
+async function writeFileHandler(
+  input: Record<string, unknown>,
+  context: ToolContext,
+): Promise<ExecToolResponse> {
+  const filePath = asString(input.path).trim()
+  if (!filePath) return { content: 'path is required', is_error: true }
+  if (typeof input.content !== 'string') {
+    return { content: 'content must be a string', is_error: true }
+  }
+
+  const sandbox = resolveSandboxConfig(input, context)
+  const writablePath = await requireWritablePath(
+    filePath,
+    'write_file path',
+    sandbox,
+  )
+  if (!writablePath.ok) return writablePath.response
+
+  const content = input.content
+  const bytes = Buffer.byteLength(content, 'utf8')
+  if (bytes > MAX_WRITE_FILE_BYTES) {
+    return {
+      content: `[error] content too large (${bytes} bytes). Max ${MAX_WRITE_FILE_BYTES} bytes.`,
+      is_error: true,
+    }
+  }
+
+  const overwrite = input.overwrite === true
+  const createDirs = input.create_dirs === true
+  const parent = path.dirname(writablePath.resolvedPath)
+  const parentExists = await directoryExists(parent)
+  if (!parentExists && !createDirs) {
+    return {
+      content: `[error] parent directory does not exist: ${parent}. Set create_dirs=true to create it.`,
+      is_error: true,
+    }
+  }
+  if (!parentExists) await fs.mkdir(parent, { recursive: true })
+
+  const existingStat = await fs.stat(writablePath.resolvedPath).catch(() => null)
+  if (existingStat?.isDirectory()) {
+    return {
+      content: `[error] target is a directory: ${writablePath.resolvedPath}`,
+      is_error: true,
+    }
+  }
+  if (existingStat && !overwrite) {
+    return {
+      content: `[error] file already exists: ${writablePath.resolvedPath}. Set overwrite=true to replace it.`,
+      is_error: true,
+    }
+  }
+
+  await fs.writeFile(writablePath.resolvedPath, content, 'utf8')
+  const configLabel = sandbox.label ? `:${sandbox.label}` : ''
+  return {
+    content: [
+      '[write_file]',
+      `path: ${writablePath.resolvedPath}`,
+      `bytes: ${bytes}`,
+      `overwritten: ${existingStat ? 'true' : 'false'}`,
+      `created_dirs: ${!parentExists && createDirs ? 'true' : 'false'}`,
+      `sandbox: server-path-guard:${sandbox.mode}:network-${sandbox.network}${configLabel}`,
+    ].join('\n'),
   }
 }
 
@@ -455,10 +901,18 @@ function formatFlatEntries(entries: FileEntry[], totalFound: number, maxResults:
 
 async function listFilesHandler(
   input: Record<string, unknown>,
+  context: ToolContext,
 ): Promise<ExecToolResponse> {
   const dirPath = asString(input.path).trim()
   if (!dirPath) return { content: 'path is required', is_error: true }
-  if (!(await directoryExists(dirPath))) {
+  const sandbox = resolveSandboxConfig(input, context)
+  const allowedPath = await requireAllowedPath(
+    dirPath,
+    'list_files path',
+    [...sandbox.allowedRoots, ...sandbox.writableRoots],
+  )
+  if (!allowedPath.ok) return allowedPath.response
+  if (!(await directoryExists(allowedPath.realPath))) {
     return { content: `[error] Not a directory: ${dirPath}`, is_error: true }
   }
   const maxDepth = asNonNegativeNumber(input.max_depth, 3, 10)
@@ -466,8 +920,8 @@ async function listFilesHandler(
   const includeHidden = input.include_hidden === true
   const pattern = asString(input.pattern).trim() || undefined
   const { entries, totalFound } = await collectFiles({
-    basePath: dirPath,
-    currentPath: dirPath,
+    basePath: allowedPath.realPath,
+    currentPath: allowedPath.realPath,
     maxDepth,
     includeHidden,
     pattern,
@@ -476,13 +930,13 @@ async function listFilesHandler(
   if (entries.length === 0) {
     return {
       content: pattern
-        ? `No files matching pattern '${pattern}' found in ${dirPath}`
-        : `Directory is empty: ${dirPath}`,
+        ? `No files matching pattern '${pattern}' found in ${allowedPath.realPath}`
+        : `Directory is empty: ${allowedPath.realPath}`,
     }
   }
   const header = pattern
-    ? `Files matching '${pattern}' in ${dirPath}:`
-    : `Contents of ${dirPath}:`
+    ? `Files matching '${pattern}' in ${allowedPath.realPath}:`
+    : `Contents of ${allowedPath.realPath}:`
   const body = pattern
     ? formatFlatEntries(entries, totalFound, maxResults)
     : formatFileTree(entries, totalFound, maxResults)
@@ -541,10 +995,19 @@ function execFileCollect(
 
 async function searchCodeHandler(
   input: Record<string, unknown>,
+  context: ToolContext,
 ): Promise<ExecToolResponse> {
   const rawPattern = asString(input.pattern).trim()
   if (!rawPattern) return { content: 'pattern is required', is_error: true }
-  const searchPath = asString(input.path).trim() || process.cwd()
+  const requestedSearchPath = asString(input.path).trim() || REPO_ROOT
+  const sandbox = resolveSandboxConfig(input, context)
+  const allowedSearchPath = await requireAllowedPath(
+    requestedSearchPath,
+    'search_code path',
+    [...sandbox.allowedRoots, ...sandbox.writableRoots],
+  )
+  if (!allowedSearchPath.ok) return allowedSearchPath.response
+  const searchPath = allowedSearchPath.realPath
   const cwd = process.cwd()
   const contextLines = asNonNegativeNumber(input.context_lines, 2, 10)
   const maxResults = asPositiveNumber(input.max_results, 50, 200)
@@ -687,7 +1150,7 @@ const tools: ToolImpl[] = [
   {
     name: 'run_command',
     description:
-      'Run a local shell command for debugging scripts or skill bash snippets. Returns status, cwd, exit code, stdout, and stderr.',
+      'Run a sandboxed local shell command for debugging scripts or skill bash snippets. Returns status, cwd, sandbox mode, exit code, stdout, and stderr.',
     input_schema: {
       type: 'object',
       properties: {
@@ -699,6 +1162,34 @@ const tools: ToolImpl[] = [
         timeout_ms: {
           type: 'number',
           description: 'Optional timeout in milliseconds (default 60000, max 600000)',
+        },
+        sandbox_mode: {
+          type: 'string',
+          enum: ['workspace-write', 'read-only'],
+          description:
+            'Sandbox mode. workspace-write allows writes only in working_directory and temp dirs. read-only prevents writes to working_directory; temp dirs remain writable.',
+        },
+        sandbox_network: {
+          type: 'string',
+          enum: ['blocked', 'allowed'],
+          description: 'Network policy for this command. Defaults to blocked.',
+        },
+        sandbox_allowed_roots: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Additional trusted roots for this command. Prefer case-level sandbox.allowedRoots for repeatable tests.',
+        },
+        sandbox_writable_roots: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Additional writable roots for this command. Use sparingly for debugging.',
+        },
+        sandbox_enabled: {
+          type: 'boolean',
+          description:
+            'Disable OS sandbox for this command when false. Path allowlist and dangerous command checks still apply.',
         },
       },
       required: ['command'],
@@ -724,6 +1215,62 @@ const tools: ToolImpl[] = [
       additionalProperties: false,
     },
     handler: readFileHandler,
+  },
+  {
+    name: 'write_file',
+    description:
+      'Create or overwrite a local UTF-8 text file inside sandbox writable roots. Defaults to no overwrite and no parent directory creation.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path to the file to write' },
+        content: {
+          type: 'string',
+          description: 'UTF-8 text content to write (max 512 KiB)',
+        },
+        overwrite: {
+          type: 'boolean',
+          description: 'Replace the file when it already exists (default false)',
+        },
+        create_dirs: {
+          type: 'boolean',
+          description:
+            'Create missing parent directories when true (default false)',
+        },
+        sandbox_mode: {
+          type: 'string',
+          enum: ['workspace-write', 'read-only'],
+          description:
+            'Sandbox mode. workspace-write allows writes inside allowed roots and writable roots; read-only allows only writable roots and temp dirs.',
+        },
+        sandbox_network: {
+          type: 'string',
+          enum: ['blocked', 'allowed'],
+          description:
+            'Accepted for parity with case sandbox; write_file does not use network.',
+        },
+        sandbox_allowed_roots: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Additional trusted roots for this write when sandbox_mode is workspace-write.',
+        },
+        sandbox_writable_roots: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Additional writable roots for this write. Prefer case-level sandbox.writableRoots for repeatable tests.',
+        },
+        sandbox_enabled: {
+          type: 'boolean',
+          description:
+            'Kept for parity with run_command. write_file always uses server path guards.',
+        },
+      },
+      required: ['path', 'content'],
+      additionalProperties: false,
+    },
+    handler: writeFileHandler,
   },
   {
     name: 'list_files',
@@ -845,6 +1392,7 @@ export function listTools(): ExecToolDef[] {
 export async function execTool(
   name: string,
   input: unknown,
+  sandbox?: SandboxConfig,
 ): Promise<ExecToolResponse> {
   const tool = tools.find((t) => t.name === name)
   if (!tool) return { content: `unknown tool: ${name}`, is_error: true }
@@ -853,7 +1401,7 @@ export async function execTool(
       input && typeof input === 'object' && !Array.isArray(input)
         ? (input as Record<string, unknown>)
         : {}
-    return await tool.handler(inputObj)
+    return await tool.handler(inputObj, { sandbox })
   } catch (e) {
     return { content: `tool error: ${(e as Error).message}`, is_error: true }
   }

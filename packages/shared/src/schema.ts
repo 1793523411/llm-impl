@@ -81,6 +81,16 @@ export const Tool = z.object({
 })
 export type Tool = z.infer<typeof Tool>
 
+export const SandboxConfig = z.object({
+  enabled: z.boolean().optional(),
+  mode: z.enum(['workspace-write', 'read-only']).optional(),
+  network: z.enum(['blocked', 'allowed']).optional(),
+  allowedRoots: z.array(z.string()).optional(),
+  writableRoots: z.array(z.string()).optional(),
+  label: z.string().optional(),
+})
+export type SandboxConfig = z.infer<typeof SandboxConfig>
+
 export const SkillConfig = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -270,6 +280,7 @@ export type StreamEvent = z.infer<typeof StreamEvent>
 export const ExecToolRequest = z.object({
   name: z.string(),
   input: z.unknown().optional(),
+  sandbox: SandboxConfig.optional(),
 })
 export type ExecToolRequest = z.infer<typeof ExecToolRequest>
 
@@ -343,6 +354,7 @@ export const Case = z.object({
   skillRoots: z.array(z.string()).optional(),
   skills: z.array(SkillConfig).optional(),
   mcpServers: z.array(McpServerConfig).optional(),
+  sandbox: SandboxConfig.optional(),
   messages: z.array(Message),
   lastRun: z
     .object({

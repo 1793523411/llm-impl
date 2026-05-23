@@ -1,8 +1,14 @@
-import { useEffect, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import type {
   ExecToolDef,
   McpServerConfig,
   McpToolConfig,
+  SandboxConfig,
   SkillConfig,
   Tool,
 } from '@llm-impl/shared'
@@ -12,13 +18,14 @@ import { ModelConfigForm } from './ConfigPanel'
 import { ModelInputPreview } from './ModelInputPreview'
 import { AlertDialog } from './ui/AppDialog'
 
-type SetupTab = 'model' | 'tools' | 'skills' | 'mcp' | 'input'
+type SetupTab = 'model' | 'tools' | 'skills' | 'mcp' | 'sandbox' | 'input'
 
 const tabs: Array<{ id: SetupTab; label: string }> = [
   { id: 'model', label: 'Model' },
   { id: 'tools', label: 'Tools' },
   { id: 'skills', label: 'Skills' },
   { id: 'mcp', label: 'MCP' },
+  { id: 'sandbox', label: 'Sandbox' },
   { id: 'input', label: 'Model Input' },
 ]
 
@@ -91,6 +98,7 @@ export function SystemAndTools() {
           {activeTab === 'tools' && <ToolsTab />}
           {activeTab === 'skills' && <SkillsTab />}
           {activeTab === 'mcp' && <McpTab />}
+          {activeTab === 'sandbox' && <SandboxTab />}
           {activeTab === 'input' && <ModelInputPreview defaultOpen />}
         </div>
       </div>
@@ -285,6 +293,261 @@ function SchemaPreview({ schema }: { schema: Record<string, unknown> }) {
     <pre className="tool-schema-preview scrollbar">
       {JSON.stringify(schema, null, 2)}
     </pre>
+  )
+}
+
+const defaultSandboxConfig = (): SandboxConfig => ({
+  label: 'case-sandbox',
+  mode: 'workspace-write',
+  network: 'blocked',
+  allowedRoots: [],
+  writableRoots: [],
+})
+
+const linesToPaths = (value: string): string[] =>
+  value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+const pathsToLines = (paths: string[] | undefined): string =>
+  (paths ?? []).join('\n')
+
+function SandboxTab() {
+  const sandbox = useStore((s) => s.sandbox)
+  const setSandbox = useStore((s) => s.setSandbox)
+  const effectiveSandbox = sandbox ?? defaultSandboxConfig()
+  const [allowedRootsText, setAllowedRootsText] = useState(() =>
+    pathsToLines(effectiveSandbox.allowedRoots),
+  )
+  const [writableRootsText, setWritableRootsText] = useState(() =>
+    pathsToLines(effectiveSandbox.writableRoots),
+  )
+  const [rawText, setRawText] = useState(() =>
+    JSON.stringify(effectiveSandbox, null, 2),
+  )
+  const [rawError, setRawError] = useState<string | null>(null)
+  const [feedback, setFeedback] = useState<string | null>(null)
+  const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    setAllowedRootsText(pathsToLines(effectiveSandbox.allowedRoots))
+    setWritableRootsText(pathsToLines(effectiveSandbox.writableRoots))
+    setRawText(JSON.stringify(effectiveSandbox, null, 2))
+    setRawError(null)
+  }, [sandbox])
+
+  useEffect(
+    () => () => {
+      if (feedbackTimer.current) clearTimeout(feedbackTimer.current)
+    },
+    [],
+  )
+
+  const flashFeedback = (message: string) => {
+    setFeedback(message)
+    if (feedbackTimer.current) clearTimeout(feedbackTimer.current)
+    feedbackTimer.current = setTimeout(() => setFeedback(null), 1600)
+  }
+
+  const updateSandbox = (patch: Partial<SandboxConfig>, message?: string) => {
+    setSandbox({
+      ...defaultSandboxConfig(),
+      ...(sandbox ?? {}),
+      ...patch,
+    })
+    if (message) flashFeedback(message)
+  }
+
+  const applyRaw = () => {
+    try {
+      const parsed = JSON.parse(rawText || 'null') as SandboxConfig | null
+      if (parsed !== null && (typeof parsed !== 'object' || Array.isArray(parsed))) {
+        throw new Error('sandbox must be an object or null')
+      }
+      setSandbox(parsed)
+      setRawError(null)
+      flashFeedback(parsed ? 'JSON applied' : 'Using server defaults')
+    } catch (e) {
+      setRawError((e as Error).message)
+    }
+  }
+
+  return (
+    <div className="setup-section space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="label">case sandbox</div>
+          <div className="mt-1 text-xs text-zinc-500">
+            Saved into this case JSON and inherited by runnable built-in tools.
+          </div>
+        </div>
+        <span className={`tool-status ${sandbox ? 'is-enabled' : ''}`}>
+          {sandbox ? 'case' : 'default'}
+        </span>
+      </div>
+      {feedback && (
+        <div className="rounded border border-emerald-800 bg-emerald-950/40 px-2 py-1 text-xs text-emerald-300">
+          {feedback}
+        </div>
+      )}
+
+      <div className="rounded border border-zinc-800 bg-zinc-950 p-3 space-y-3">
+        <label className="flex items-center gap-2 text-sm text-zinc-300">
+          <input
+            type="checkbox"
+            checked={effectiveSandbox.enabled !== false}
+            onChange={(e) =>
+              updateSandbox(
+                { enabled: e.target.checked },
+                e.target.checked ? 'OS sandbox enabled' : 'OS sandbox disabled',
+              )
+            }
+          />
+          enable OS sandbox when available
+        </label>
+
+        <div>
+          <div className="label mb-1">label</div>
+          <input
+            className="field"
+            value={effectiveSandbox.label ?? ''}
+            placeholder="case-sandbox"
+            onChange={(e) => updateSandbox({ label: e.target.value })}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <div className="label mb-1">write mode</div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                className={`btn ${effectiveSandbox.mode !== 'read-only' ? 'btn-primary' : ''}`}
+                onClick={() =>
+                  updateSandbox({ mode: 'workspace-write' }, 'Write mode: workspace')
+                }
+              >
+                workspace
+              </button>
+              <button
+                className={`btn ${effectiveSandbox.mode === 'read-only' ? 'btn-primary' : ''}`}
+                onClick={() =>
+                  updateSandbox({ mode: 'read-only' }, 'Write mode: read only')
+                }
+              >
+                read only
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <div className="label mb-1">network</div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                className={`btn ${effectiveSandbox.network !== 'allowed' ? 'btn-primary' : ''}`}
+                onClick={() =>
+                  updateSandbox({ network: 'blocked' }, 'Network blocked')
+                }
+              >
+                blocked
+              </button>
+              <button
+                className={`btn ${effectiveSandbox.network === 'allowed' ? 'btn-primary' : ''}`}
+                onClick={() =>
+                  updateSandbox({ network: 'allowed' }, 'Network allowed')
+                }
+              >
+                allowed
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="label mb-1">allowed roots</div>
+          <textarea
+            className="field-area font-mono text-xs"
+            rows={4}
+            placeholder="One absolute path per line. Empty inherits server defaults."
+            value={allowedRootsText}
+            onChange={(e) => {
+              const value = e.target.value
+              setAllowedRootsText(value)
+              updateSandbox({ allowedRoots: linesToPaths(value) })
+            }}
+          />
+          <div className="mt-1 text-[10px] text-zinc-600">
+            Read/search/list and command working directories must stay inside these roots or server defaults.
+          </div>
+        </div>
+
+        <div>
+          <div className="label mb-1">writable roots</div>
+          <textarea
+            className="field-area font-mono text-xs"
+            rows={3}
+            placeholder="/tmp/llm-impl-debug-output"
+            value={writableRootsText}
+            onChange={(e) => {
+              const value = e.target.value
+              setWritableRootsText(value)
+              updateSandbox({ writableRoots: linesToPaths(value) })
+            }}
+          />
+          <div className="mt-1 text-[10px] text-zinc-600">
+            Extra output folders for this case. They also become readable for debugging generated files.
+          </div>
+        </div>
+      </div>
+
+      <div className="flex gap-2">
+        {!sandbox && (
+          <button
+            className="btn btn-primary"
+            onClick={() => {
+              setSandbox(defaultSandboxConfig())
+              flashFeedback('Case sandbox enabled')
+            }}
+          >
+            Enable case sandbox
+          </button>
+        )}
+        <button
+          className="btn"
+          onClick={() => {
+            setSandbox(null)
+            setRawError(null)
+            flashFeedback('Using server defaults')
+          }}
+        >
+          Use server default
+        </button>
+      </div>
+
+      <details>
+        <summary className="cursor-pointer text-xs text-zinc-500">
+          Advanced JSON
+        </summary>
+        <div className="mt-2 space-y-2">
+          <textarea
+            className={`field-area font-mono text-xs ${rawError ? 'border-red-700' : ''}`}
+            rows={8}
+            value={rawText}
+            onChange={(e) => setRawText(e.target.value)}
+          />
+          {rawError && <div className="text-xs text-red-400">{rawError}</div>}
+          <button className="btn btn-primary" onClick={applyRaw}>
+            Apply JSON
+          </button>
+        </div>
+      </details>
+
+      <div className="text-[10px] leading-4 text-zinc-500">
+        Fields: enabled, label, mode, network, allowedRoots, writableRoots.
+        Per-command input can still override mode, network, allowed roots, and
+        writable roots for a single tool call.
+      </div>
+    </div>
   )
 }
 

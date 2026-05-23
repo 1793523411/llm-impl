@@ -8,7 +8,8 @@
 
 **2. 服务端实际能跑的 tool** — 在 `apps/server/src/exec-tool.ts` 写死的白名单。
 默认包含一组基础工具：`get_time` / `run_command` / `read_file` /
-`list_files` / `search_code` / `fetch_url` / `web_fetch` / `calculator`。
+`write_file` / `list_files` / `search_code` / `fetch_url` / `web_fetch` /
+`calculator`。
 
 两者**通过 name 字段对应**：你定义一个 `calculator` 工具给模型，模型决定调它，
 如果服务端白名单里也有同名 `calculator`，前端就显示 ▶ run 按钮可一键真执行。
@@ -68,13 +69,85 @@
 | name | 干啥 | 安全约束 |
 |---|---|---|
 | `get_time` | 返回当前日期、时间、星期、时区、timestamp | 无副作用，可指定 IANA timezone |
-| `run_command` | 执行本地 shell 命令，适合调试 skill 里的 bash/script | 危险系统命令拦截，默认 60s 超时，输出截断 |
-| `read_file` | 读取本地文本文件，带行号 | 大文件需要 `offset` / `limit` |
-| `list_files` | 列目录、按 glob 过滤 | 自动跳过 `node_modules` / `.git` 等噪音目录 |
-| `search_code` | 本地代码 regex / symbol 搜索 | 优先 `rg`，失败回退 `grep`，输出截断 |
+| `run_command` | 执行本地 shell 命令，适合调试 skill 里的 bash/script | 默认 sandbox；工作目录必须在 allowlist 内；macOS 下用 `sandbox-exec` 限制写入范围并禁用网络；危险系统命令拦截；默认 60s 超时，输出截断 |
+| `read_file` | 读取本地文本文件，带行号 | 只能读 allowlist 内路径；大文件需要 `offset` / `limit` |
+| `write_file` | 创建或覆盖本地 UTF-8 文本文件 | 只能写 sandbox 可写根；默认不覆盖已有文件，默认不创建父目录；单次最多 512KiB |
+| `list_files` | 列目录、按 glob 过滤 | 只能列 allowlist 内路径；自动跳过 `node_modules` / `.git` 等噪音目录 |
+| `search_code` | 本地代码 regex / symbol 搜索 | 只能搜 allowlist 内路径；优先 `rg`，失败回退 `grep`，输出截断 |
 | `fetch_url` | GET 一个 URL，返回 text/html/json | 限 http(s)，15s 超时，最大 128KB |
 | `web_fetch` | `fetch_url` 的兼容别名 | 同上 |
 | `calculator` | 算数学表达式 | 正则白名单字符 `[\d\s+\-*/().]+`，`new Function` 跑 |
+
+#### `run_command` sandbox
+
+`run_command` 默认启用本地沙箱：
+
+- 默认允许根：当前 repo、`skills/`、 sibling `../rule_agent/skills`
+- 额外允许根：设置环境变量 `LLM_IMPL_ALLOWED_ROOTS`，多个路径用系统 path delimiter 分隔
+- `sandbox_mode: "workspace-write"`：允许写 `working_directory` 和临时目录
+- `sandbox_mode: "read-only"`：不允许写 `working_directory`，但仍允许写临时目录，避免多数解释器启动失败
+- `write_file` 在 `workspace-write` 下允许写 allowlist / writable roots / 临时目录；在 `read-only` 下只允许写 writable roots / 临时目录
+- macOS sandbox 默认禁用网络访问，并拒绝命令里直接引用 allowlist 外的绝对路径
+- macOS 有 `/usr/bin/sandbox-exec` 时会使用 OS sandbox；其他系统退化为路径 allowlist + 精简环境变量 + 危险命令拦截
+
+沙箱配置有三层，后者覆盖前者：
+
+1. server 全局默认：repo / skills / `LLM_IMPL_ALLOWED_ROOTS`
+2. case JSON 的 `sandbox` 字段：当前 case 内所有内置工具执行都会继承
+3. 单次内置工具 `input`：只影响这一条工具调用。`run_command` / `write_file` 支持常用 sandbox 覆盖字段
+
+case 级示例：
+
+```json
+{
+  "sandbox": {
+    "label": "skill-debug-readonly",
+    "mode": "read-only",
+    "network": "blocked",
+    "allowedRoots": [
+      "/Users/bytedance/Desktop/work/desktop/llm-impl",
+      "/Users/bytedance/Desktop/work/desktop/rule_agent/skills"
+    ],
+    "writableRoots": [
+      "/tmp/llm-impl-debug-output"
+    ]
+  }
+}
+```
+
+单次工具调用覆盖示例：
+
+```json
+{
+  "type": "tool_use",
+  "name": "run_command",
+  "input": {
+    "command": "python scripts/check.py",
+    "working_directory": "/Users/bytedance/Desktop/work/desktop/rule_agent/skills/foo",
+    "sandbox_mode": "workspace-write",
+    "sandbox_network": "allowed",
+    "sandbox_allowed_roots": ["/Users/bytedance/Desktop/work/desktop/extra-fixtures"],
+    "sandbox_writable_roots": ["/tmp/llm-impl-check-output"]
+  }
+}
+```
+
+`write_file` 示例：
+
+```json
+{
+  "type": "tool_use",
+  "name": "write_file",
+  "input": {
+    "path": "/tmp/llm-impl-check-output/result.txt",
+    "content": "ok\n",
+    "create_dirs": true,
+    "overwrite": false,
+    "sandbox_mode": "read-only",
+    "sandbox_writable_roots": ["/tmp/llm-impl-check-output"]
+  }
+}
+```
 
 ### 增加一个工具
 

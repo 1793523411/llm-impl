@@ -120,7 +120,11 @@ app.post('/api/exec-tool', async (c) => {
   if (!parsed.success) {
     return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400)
   }
-  const result = await execTool(parsed.data.name, parsed.data.input ?? {})
+  const result = await execTool(
+    parsed.data.name,
+    parsed.data.input ?? {},
+    parsed.data.sandbox,
+  )
   return c.json(result)
 })
 

@@ -10,6 +10,7 @@ import type {
   McpToolConfig,
   Message,
   ProviderInfo,
+  SandboxConfig,
   SkillConfig,
   Tool,
   UserContentBlock,
@@ -51,6 +52,7 @@ interface Store {
   skillRoots: string[]
   skills: SkillConfig[]
   mcpServers: McpServerConfig[]
+  sandbox: SandboxConfig | null
   messages: Message[]
 
   // run state
@@ -74,6 +76,7 @@ interface Store {
   // ─── actions ────────────────────────────────────────────────────────────
   setConfig: (patch: Partial<Config>) => void
   setSystem: (s: string) => void
+  setSandbox: (sandbox: SandboxConfig | null) => void
 
   setBuiltinToolEnabled: (name: string, enabled: boolean) => void
   removeTool: (i: number) => void
@@ -131,6 +134,7 @@ type CaseBuildState = Pick<
   | 'skillRoots'
   | 'skills'
   | 'mcpServers'
+  | 'sandbox'
   | 'messages'
   | 'lastUsage'
   | 'lastLatency'
@@ -258,6 +262,7 @@ const buildCaseFromState = (
     ...(state.skillRoots.length > 0 && { skillRoots: state.skillRoots }),
     ...(state.skills.length > 0 && { skills: state.skills }),
     ...(state.mcpServers.length > 0 && { mcpServers: state.mcpServers }),
+    ...(state.sandbox && { sandbox: state.sandbox }),
     messages: state.messages,
     ...(hasLastRun && {
       lastRun: {
@@ -305,6 +310,7 @@ const stableCaseFingerprint = (path: string, data: Case): string => {
     ...(data.skillRoots && { skillRoots: data.skillRoots }),
     ...(data.skills && { skills: data.skills }),
     ...(data.mcpServers && { mcpServers: data.mcpServers }),
+    ...(data.sandbox && { sandbox: data.sandbox }),
     messages: data.messages,
     ...(stableLastRun && { lastRun: stableLastRun }),
     ...(Object.keys(stableMeta).length > 0 && { meta: stableMeta }),
@@ -382,6 +388,7 @@ export const useStore = create<Store>()(
       skillRoots: [],
       skills: [],
       mcpServers: [],
+      sandbox: null,
       messages: [emptyUserMessage()],
       status: 'idle',
       error: null,
@@ -396,6 +403,7 @@ export const useStore = create<Store>()(
 
       setConfig: (patch) => set((s) => ({ config: { ...s.config, ...patch } })),
       setSystem: (system) => set({ system }),
+      setSandbox: (sandbox) => set({ sandbox }),
 
       setBuiltinToolEnabled: (name, enabled) =>
         set((s) => {
@@ -763,6 +771,7 @@ export const useStore = create<Store>()(
           tools: [],
           skills: data.skills ?? [],
           mcpServers: data.mcpServers ?? [],
+          sandbox: data.sandbox ?? null,
           skillRoots: data.skillRoots ?? [],
           messages: data.messages,
           status: 'idle',
@@ -790,6 +799,7 @@ export const useStore = create<Store>()(
           skillRoots: parsed.skillRoots ?? [],
           skills: parsed.skills ?? [],
           mcpServers: parsed.mcpServers ?? [],
+          sandbox: parsed.sandbox ?? null,
           messages: parsed.messages ?? [emptyUserMessage()],
           status: 'idle',
           error: null,
@@ -818,6 +828,7 @@ export const useStore = create<Store>()(
                 skillRoots: data.skillRoots ?? [],
                 skills: data.skills ?? [],
                 mcpServers: data.mcpServers ?? [],
+                sandbox: data.sandbox ?? null,
                 messages: data.messages ?? [emptyUserMessage()],
                 currentCasePath,
                 currentCaseMeta: data.meta ?? null,
@@ -837,6 +848,7 @@ export const useStore = create<Store>()(
             skillRoots: ws.skillRoots ?? [],
             skills: ws.skills ?? [],
             mcpServers: ws.mcpServers ?? [],
+            sandbox: ws.sandbox ?? null,
             messages:
               ws.messages && ws.messages.length > 0
                 ? ws.messages
@@ -888,7 +900,7 @@ export const useStore = create<Store>()(
       },
 
       runRegisteredTool: async (msgIdx, blockIdx) => {
-        const { messages, execTools, tools } = get()
+        const { messages, execTools, tools, sandbox } = get()
         const msg = messages[msgIdx]
         if (!msg || msg.role !== 'user') return
         const block = msg.content[blockIdx]
@@ -988,7 +1000,7 @@ export const useStore = create<Store>()(
             ? await api.loadSkill(skill)
             : mcpMatch
               ? await api.callMcpTool(mcpMatch.server, mcpMatch.tool.name, tu.input)
-              : await api.execTool(tu.name, tu.input)
+              : await api.execTool(tu.name, tu.input, sandbox)
           writeToolResult(result)
         } catch (e) {
           writeToolResult({
@@ -1041,6 +1053,7 @@ export const useStore = create<Store>()(
           skillRoots: data.skillRoots ?? [],
           skills: data.skills ?? [],
           mcpServers: data.mcpServers ?? [],
+          sandbox: data.sandbox ?? null,
           messages: data.messages ?? [emptyUserMessage()],
           status: 'idle',
           error: null,
