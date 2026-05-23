@@ -17,7 +17,7 @@
       ]
     },
     "ark-responses": {
-      "baseUrl": "https://ark-cn-beijing.bytedance.net/api/v3",
+      "baseUrl": "https://your-openai-compatible-endpoint.example/api/v3",
       "apiKey": "ark-...",
       "api": "openai-responses",
       "models": [
