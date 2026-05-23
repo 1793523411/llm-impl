@@ -1,10 +1,14 @@
+import { useState } from 'react'
 import { useStore } from '../store'
+import { Compare } from './Compare'
 
 export function SendBar() {
   const status = useStore((s) => s.status)
   const error = useStore((s) => s.error)
   const send = useStore((s) => s.send)
   const messages = useStore((s) => s.messages)
+  const currentCasePath = useStore((s) => s.currentCasePath)
+  const [comparing, setComparing] = useState(false)
 
   const last = messages[messages.length - 1]
   const lastIsAssistantWithToolUse =
@@ -19,6 +23,10 @@ export function SendBar() {
     : lastIsUserWithEmptyToolResult
       ? 'Continue ▶'
       : 'Send ▶'
+  const compareLabel = currentCasePath ? 'Compare Case' : 'Compare Draft'
+  const compareTitle = currentCasePath
+    ? `Compare two models on current case: ${currentCasePath}`
+    : 'Compare two models on the unsaved workspace draft'
 
   return (
     <div className="border-t border-zinc-800 bg-zinc-950 px-3 py-2 flex items-center gap-3">
@@ -29,6 +37,9 @@ export function SendBar() {
       >
         {status === 'running' ? 'running…' : sendLabel}
       </button>
+      <button className="btn" onClick={() => setComparing(true)} title={compareTitle}>
+        ⇆ {compareLabel}
+      </button>
       <span className="text-xs text-zinc-500">
         {messages.length} message{messages.length === 1 ? '' : 's'}
       </span>
@@ -38,6 +49,7 @@ export function SendBar() {
       <span className="text-[10px] text-zinc-600 ml-auto">
         ⌘+Enter to send
       </span>
+      {comparing && <Compare onClose={() => setComparing(false)} />}
     </div>
   )
 }

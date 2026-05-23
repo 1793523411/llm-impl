@@ -106,6 +106,27 @@ curl http://localhost:3181/api/providers | jq .
 
 前端启动时拉这个填充 provider / model 下拉。
 
+## /api/curl 端点
+
+Model Input 面板里的 `Copy Stream` / `Copy Non-stream` 会调用：
+
+```bash
+curl http://localhost:3181/api/curl \
+  -H 'content-type: application/json' \
+  -d '{"provider":"polo","mode":"stream","body":{"model":"..."}}'
+```
+
+server 侧会读取本地 provider 配置里的真实 `apiKey`，返回一段可直接粘贴执行的 cURL。
+它不会通过 `/api/providers` 暴露 key；只有显式复制 cURL 时才把 key 写入剪贴板。
+
+`mode` 可选：
+
+- `stream`：生成流式请求，匹配主调试区 `Send` / `Compare` 的 replay 路径
+- `non-stream`：生成非流式请求，适合一次性查看完整响应 JSON
+
+生成时还会按目标 provider 做 replay 修正，例如裁掉尾部 assistant turn，
+以及为 DeepSeek reasoning tool history 自动加 `thinking.disabled`。
+
 ## 连通性测试
 
 右侧模型选择器旁的 `Test` 会调用：

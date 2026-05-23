@@ -145,7 +145,7 @@ export function ModelConfigForm() {
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
-                checked={!!config.thinking}
+                checked={config.thinking?.type === 'enabled'}
                 onChange={(e) =>
                   setConfig({
                     thinking: e.target.checked
@@ -156,7 +156,7 @@ export function ModelConfigForm() {
               />
               <span>extended thinking</span>
             </label>
-            {config.thinking && (
+            {config.thinking?.type === 'enabled' && (
               <div>
                 <div className="label mb-1">thinking budget</div>
                 <input

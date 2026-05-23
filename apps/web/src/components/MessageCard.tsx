@@ -5,8 +5,8 @@ import type {
   UserContentBlock,
 } from '@llm-impl/shared'
 import { useStore } from '../store'
-import { Select } from './ui/Select'
 import { MarkdownPreview } from './MarkdownPreview'
+import { Select } from './ui/Select'
 
 const roleStyles = {
   user: 'border-blue-900 bg-blue-950/20',
@@ -125,6 +125,8 @@ function BlockEditor({
     return (
       <ToolUseBlockEditor
         block={block}
+        msgIdx={msgIdx}
+        blockIdx={blockIdx}
         onChange={(patch) => updateBlock(msgIdx, blockIdx, patch)}
         onRemove={() => removeBlock(msgIdx, blockIdx)}
       />
@@ -336,6 +338,11 @@ function ToolResultBlockEditor({
         <div className="tool-call-summary">
           <span>matches</span>
           <code>{matchingToolName}</code>
+          {!canRun && (
+            <span className="tool-status" title="Manual/mock result">
+              mock
+            </span>
+          )}
         </div>
       )}
       {matchingToolInput && (
@@ -395,10 +402,14 @@ function ToolResultBlockEditor({
 
 function ToolUseBlockEditor({
   block,
+  msgIdx,
+  blockIdx,
   onChange,
   onRemove,
 }: {
   block: Extract<AssistantContentBlock, { type: 'tool_use' }>
+  msgIdx: number
+  blockIdx: number
   onChange: (patch: Partial<Extract<AssistantContentBlock, { type: 'tool_use' }>>) => void
   onRemove: () => void
 }) {
@@ -406,25 +417,36 @@ function ToolUseBlockEditor({
     JSON.stringify(block.input, null, 2),
   )
   const [inputError, setInputError] = useState<string | null>(null)
+  const [toolNameMode, setToolNameMode] = useState<'pick' | 'custom'>('pick')
   const lastSyncedBlockIdRef = useRef(block.id)
   const lastSyncedInputRef = useRef(JSON.stringify(block.input, null, 2))
   const tools = useStore((s) => s.tools)
   const skills = useStore((s) => s.skills)
   const mcpServers = useStore((s) => s.mcpServers)
+  const messages = useStore((s) => s.messages)
   const getEffectiveTools = useStore((s) => s.getEffectiveTools)
+  const addMockToolResultAfter = useStore((s) => s.addMockToolResultAfter)
   const effectiveTools = getEffectiveTools()
-  const toolOptions = effectiveTools.some((tool) => tool.name === block.name)
+  const isConfiguredTool = effectiveTools.some((tool) => tool.name === block.name)
+  const toolNameOptions = effectiveTools.some((tool) => tool.name === block.name)
     ? effectiveTools
     : block.name
       ? [
           {
             name: block.name,
-            description: 'custom tool name',
+            description: 'custom/mock tool name',
             input_schema: {},
           },
           ...effectiveTools,
         ]
       : effectiveTools
+  const toolNameListId = `tool-name-options-${block.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`
+  const nextMessage = messages[msgIdx + 1]
+  const hasMockResult =
+    nextMessage?.role === 'user' &&
+    nextMessage.content.some(
+      (item) => item.type === 'tool_result' && item.tool_use_id === block.id,
+    )
   void tools
   void skills
   void mcpServers
@@ -438,24 +460,89 @@ function ToolUseBlockEditor({
       setInputText(serializedInput)
       setInputError(null)
     }
+    if (isNewBlock) setToolNameMode(block.name && !isConfiguredTool ? 'custom' : 'pick')
     lastSyncedBlockIdRef.current = block.id
     lastSyncedInputRef.current = serializedInput
-  }, [block.id, inputText, serializedInput])
+  }, [block.id, block.name, inputText, isConfiguredTool, serializedInput])
+
+  useEffect(() => {
+    if (block.name && !isConfiguredTool && toolNameMode === 'pick') {
+      setToolNameMode('custom')
+    }
+  }, [block.name, isConfiguredTool, toolNameMode])
 
   return (
-    <BlockShell label="tool_use" accent="text-emerald-400" onRemove={onRemove}>
+    <BlockShell
+      label="tool_use"
+      accent="text-emerald-400"
+      onRemove={onRemove}
+      actions={
+        <button
+          className="btn-ghost text-[10px] text-zinc-500 hover:text-zinc-300"
+          disabled={!block.id || hasMockResult}
+          onClick={() => addMockToolResultAfter(msgIdx, blockIdx)}
+          title={
+            hasMockResult
+              ? 'A matching tool_result already exists in the next user message'
+              : 'Insert a matching tool_result in the next user message'
+          }
+        >
+          {hasMockResult ? 'mock result exists' : '+ mock result'}
+        </button>
+      }
+    >
       <div className="space-y-1">
-        <div className="label mb-0.5">tool</div>
-        <Select
-          value={block.name}
-          onChange={(name) => onChange({ name })}
-          placeholder="tool name"
-          options={toolOptions.map((tool) => ({
-            value: tool.name,
-            label: tool.name,
-            searchText: `${tool.name} ${tool.description ?? ''}`,
-          }))}
-        />
+        <div className="tool-name-row">
+          <div className="tool-call-id-field flex-1">
+            <span>tool</span>
+            {toolNameMode === 'pick' ? (
+              <Select
+                value={block.name}
+                onChange={(name) => onChange({ name })}
+                placeholder="pick configured tool"
+                options={toolNameOptions.map((tool) => ({
+                  value: tool.name,
+                  label: tool.name,
+                  searchText: `${tool.name} ${tool.description ?? ''}`,
+                }))}
+              />
+            ) : (
+              <>
+                <input
+                  className="field text-xs"
+                  list={toolNameListId}
+                  placeholder="custom/mock tool name"
+                  value={block.name}
+                  onChange={(e) => onChange({ name: e.target.value })}
+                />
+                <datalist id={toolNameListId}>
+                  {effectiveTools.map((tool) => (
+                    <option key={tool.name} value={tool.name} />
+                  ))}
+                </datalist>
+              </>
+            )}
+          </div>
+          <div className="markdown-preview-toggle" role="tablist" aria-label="Tool name mode">
+            <button
+              className={toolNameMode === 'pick' ? 'is-active' : ''}
+              onClick={() => setToolNameMode('pick')}
+            >
+              Pick
+            </button>
+            <button
+              className={toolNameMode === 'custom' ? 'is-active' : ''}
+              onClick={() => setToolNameMode('custom')}
+            >
+              Custom
+            </button>
+          </div>
+          {block.name && !isConfiguredTool && (
+            <span className="tool-status" title="Manual/mock tool name">
+              mock
+            </span>
+          )}
+        </div>
       </div>
       <div className="mt-1">
         <label className="tool-call-id-field">

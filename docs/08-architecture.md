@@ -10,6 +10,7 @@ llm-impl/
 │  │     ├─ index.ts              # 路由入口
 │  │     ├─ run.ts                # runOnce + runStream（核心 LLM 调用）
 │  │     ├─ providers.ts          # 加载 config/providers.json
+│  │     ├─ curl.ts               # 按 provider 生成可运行 cURL
 │  │     ├─ exec-tool.ts          # 真执行白名单
 │  │     ├─ workspace.ts          # state/workspace.json 读写
 │  │     └─ cases.ts              # cases/ 文件树 CRUD
@@ -73,6 +74,29 @@ llm-impl/
        ↓
 [React 重渲染 MessageCard 的对应 block]
 ```
+
+### Copy cURL 的全链路
+
+```
+[user clicks Copy Stream / Copy Non-stream]
+       ↓ ModelInputPreview
+[POST /api/curl { provider, body, mode }]
+       ↓ Hono /api/curl 路由
+[buildRunnableCurl(provider, body, mode)] ← apps/server/src/curl.ts
+       ├─ getProvider(provider) 读取本地 config/providers.json 的 apiKey
+       ├─ 按 provider.api 选择 endpoint + auth headers
+       ├─ 裁掉末尾 assistant turn，避免 replay 时变成 prefill
+       ├─ DeepSeek tool history 缺 reasoning_content 时加 thinking.disabled
+       └─ mode=stream / non-stream 显式增删 stream 字段
+       ↓
+[返回完整 curl 文本给前端]
+       ↓
+[navigator.clipboard.writeText(curl)]
+```
+
+`/api/providers` 仍然不会把 `apiKey` 下发给前端；只有用户主动复制 cURL 时，
+本地 server 才会把当前 provider 的 key 写入剪贴板文本。这个功能适合本机调试，
+不要把复制出来的命令贴到公共聊天或提交到仓库。
 
 ### 持久化层
 

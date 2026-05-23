@@ -197,10 +197,15 @@ export const Config = z.object({
   max_tokens: z.number().int().positive().optional(),
   stream: z.boolean().default(false),
   thinking: z
-    .object({
-      type: z.literal('enabled'),
-      budget_tokens: z.number().int().positive(),
-    })
+    .discriminatedUnion('type', [
+      z.object({
+        type: z.literal('enabled'),
+        budget_tokens: z.number().int().positive(),
+      }),
+      z.object({
+        type: z.literal('disabled'),
+      }),
+    ])
     .optional(),
 })
 export type Config = z.infer<typeof Config>

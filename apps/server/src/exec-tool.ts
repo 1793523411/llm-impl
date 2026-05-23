@@ -32,6 +32,7 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 60_000
 const MAX_COMMAND_OUTPUT_CHARS = 64 * 1024
 const MAX_FILE_SIZE = 256 * 1024
 const MAX_WRITE_FILE_BYTES = 512 * 1024
+const MAX_EDIT_FILE_BYTES = 512 * 1024
 const MAX_FETCH_CHARS = 128 * 1024
 const DEFAULT_FETCH_CHARS = 32 * 1024
 const FETCH_TIMEOUT_MS = 15_000
@@ -790,6 +791,135 @@ async function writeFileHandler(
   }
 }
 
+function countExactMatches(content: string, target: string): number {
+  let count = 0
+  let index = 0
+  while (true) {
+    const next = content.indexOf(target, index)
+    if (next === -1) return count
+    count += 1
+    index = next + target.length
+  }
+}
+
+async function editFileHandler(
+  input: Record<string, unknown>,
+  context: ToolContext,
+): Promise<ExecToolResponse> {
+  const filePath = asString(input.path).trim()
+  if (!filePath) return { content: 'path is required', is_error: true }
+  if (typeof input.old_text !== 'string') {
+    return { content: 'old_text must be a string', is_error: true }
+  }
+  if (typeof input.new_text !== 'string') {
+    return { content: 'new_text must be a string', is_error: true }
+  }
+  if (!input.old_text) {
+    return { content: 'old_text must not be empty', is_error: true }
+  }
+  const oldText = input.old_text
+  const newText = input.new_text
+
+  const sandbox = resolveSandboxConfig(input, context)
+  const writablePath = await requireWritablePath(
+    filePath,
+    'edit_file path',
+    sandbox,
+  )
+  if (!writablePath.ok) return writablePath.response
+
+  const stat = await fs.stat(writablePath.resolvedPath).catch(() => null)
+  if (!stat) {
+    return {
+      content: `[error] file does not exist: ${writablePath.resolvedPath}`,
+      is_error: true,
+    }
+  }
+  if (!stat.isFile()) {
+    return {
+      content: `[error] target is not a file: ${writablePath.resolvedPath}`,
+      is_error: true,
+    }
+  }
+  if (stat.size > MAX_EDIT_FILE_BYTES) {
+    return {
+      content: `[error] file too large (${stat.size} bytes). Max ${MAX_EDIT_FILE_BYTES} bytes.`,
+      is_error: true,
+    }
+  }
+
+  const original = await fs.readFile(writablePath.resolvedPath, 'utf8')
+  const matchCount = countExactMatches(original, oldText)
+  if (matchCount === 0) {
+    return {
+      content: '[error] old_text was not found in file',
+      is_error: true,
+    }
+  }
+
+  const replaceAll = input.replace_all === true
+  let expectedReplacements: number | undefined
+  if (input.expected_replacements !== undefined) {
+    if (
+      typeof input.expected_replacements !== 'number' ||
+      !Number.isFinite(input.expected_replacements) ||
+      input.expected_replacements < 0 ||
+      !Number.isInteger(input.expected_replacements)
+    ) {
+      return {
+        content: 'expected_replacements must be a non-negative integer',
+        is_error: true,
+      }
+    }
+    expectedReplacements = input.expected_replacements
+  }
+
+  if (!replaceAll && matchCount !== 1) {
+    return {
+      content: `[error] old_text matched ${matchCount} times. Make old_text more specific or set replace_all=true.`,
+      is_error: true,
+    }
+  }
+
+  const replacementCount = replaceAll ? matchCount : 1
+  if (
+    expectedReplacements !== undefined &&
+    replacementCount !== expectedReplacements
+  ) {
+    return {
+      content: `[error] replacement count mismatch: expected ${expectedReplacements}, got ${replacementCount}.`,
+      is_error: true,
+    }
+  }
+
+  const edited = replaceAll
+    ? original.split(oldText).join(newText)
+    : original.replace(oldText, newText)
+  const bytes = Buffer.byteLength(edited, 'utf8')
+  if (bytes > MAX_EDIT_FILE_BYTES) {
+    return {
+      content: `[error] edited file would be too large (${bytes} bytes). Max ${MAX_EDIT_FILE_BYTES} bytes.`,
+      is_error: true,
+    }
+  }
+
+  const dryRun = input.dry_run === true
+  if (!dryRun) await fs.writeFile(writablePath.resolvedPath, edited, 'utf8')
+  const configLabel = sandbox.label ? `:${sandbox.label}` : ''
+  return {
+    content: [
+      '[edit_file]',
+      `path: ${writablePath.resolvedPath}`,
+      `matches: ${matchCount}`,
+      `replacements: ${replacementCount}`,
+      `bytes_before: ${Buffer.byteLength(original, 'utf8')}`,
+      `bytes_after: ${bytes}`,
+      `dry_run: ${dryRun ? 'true' : 'false'}`,
+      `sandbox: server-path-guard:${sandbox.mode}:network-${sandbox.network}${configLabel}`,
+    ].join('\n'),
+  }
+}
+
 type FileEntry = {
   relativePath: string
   isDirectory: boolean
@@ -1271,6 +1401,73 @@ const tools: ToolImpl[] = [
       additionalProperties: false,
     },
     handler: writeFileHandler,
+  },
+  {
+    name: 'edit_file',
+    description:
+      'Edit an existing UTF-8 text file inside sandbox writable roots by exact old_text/new_text replacement. Defaults to one exact match.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path to the file to edit' },
+        old_text: {
+          type: 'string',
+          description:
+            'Exact text to replace. Must match once unless replace_all=true.',
+        },
+        new_text: {
+          type: 'string',
+          description: 'Replacement text',
+        },
+        replace_all: {
+          type: 'boolean',
+          description:
+            'Replace every exact match when true. Defaults to false.',
+        },
+        expected_replacements: {
+          type: 'number',
+          description:
+            'Optional guard for the number of replacements that must happen.',
+        },
+        dry_run: {
+          type: 'boolean',
+          description:
+            'Validate and report replacement counts without writing the file.',
+        },
+        sandbox_mode: {
+          type: 'string',
+          enum: ['workspace-write', 'read-only'],
+          description:
+            'Sandbox mode. workspace-write allows edits inside allowed roots and writable roots; read-only allows only writable roots and temp dirs.',
+        },
+        sandbox_network: {
+          type: 'string',
+          enum: ['blocked', 'allowed'],
+          description:
+            'Accepted for parity with case sandbox; edit_file does not use network.',
+        },
+        sandbox_allowed_roots: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Additional trusted roots for this edit when sandbox_mode is workspace-write.',
+        },
+        sandbox_writable_roots: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Additional writable roots for this edit. Prefer case-level sandbox.writableRoots for repeatable tests.',
+        },
+        sandbox_enabled: {
+          type: 'boolean',
+          description:
+            'Kept for parity with run_command. edit_file always uses server path guards.',
+        },
+      },
+      required: ['path', 'old_text', 'new_text'],
+      additionalProperties: false,
+    },
+    handler: editFileHandler,
   },
   {
     name: 'list_files',

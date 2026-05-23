@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import {
   toAnthropicMessages,
   toAnthropicRequestOptions,
@@ -13,6 +13,7 @@ import {
   type Message,
   type Tool,
 } from '@llm-impl/shared'
+import * as apiClient from '../api'
 import { useStore } from '../store'
 
 type PreviewItem = {
@@ -25,6 +26,8 @@ type Preview = {
   body: unknown
 }
 
+type CurlMode = 'stream' | 'non-stream'
+
 function usesNewTokenParam(model: string): boolean {
   return /^(o[0-9]|gpt-5)/.test(model)
 }
@@ -34,6 +37,26 @@ function tokenField(model: string, max: number | undefined) {
   return usesNewTokenParam(model)
     ? { max_completion_tokens: max }
     : { max_tokens: max }
+}
+
+function shouldIncludeReasoningContent(
+  config: Config,
+  providerBaseUrl?: string,
+): boolean {
+  return (
+    config.thinking?.type !== 'disabled' &&
+    usesOpenAIReasoningContent(config.model, providerBaseUrl)
+  )
+}
+
+function openAIThinkingField(config: Config, providerBaseUrl?: string) {
+  if (
+    config.thinking?.type === 'disabled' &&
+    usesOpenAIReasoningContent(config.model, providerBaseUrl)
+  ) {
+    return { thinking: { type: 'disabled' } }
+  }
+  return {}
 }
 
 function buildPreview({
@@ -58,8 +81,8 @@ function buildPreview({
       body: {
         model: config.model,
         messages: toOpenAIMessages(system || undefined, messages, {
-          includeReasoningContent: usesOpenAIReasoningContent(
-            config.model,
+          includeReasoningContent: shouldIncludeReasoningContent(
+            config,
             providerBaseUrl,
           ),
         }),
@@ -69,6 +92,7 @@ function buildPreview({
           temperature: config.temperature,
         }),
         ...tokenField(config.model, config.max_tokens),
+        ...openAIThinkingField(config, providerBaseUrl),
         ...(convertedTools && { tools: convertedTools }),
       },
     }
@@ -159,6 +183,8 @@ export function ModelInputPreview({ defaultOpen = false }: { defaultOpen?: boole
   const getEffectiveSystem = useStore((s) => s.getEffectiveSystem)
   const getEffectiveTools = useStore((s) => s.getEffectiveTools)
   const [open, setOpen] = useState(defaultOpen)
+  const [copyStatus, setCopyStatus] = useState<string | null>(null)
+  const [copying, setCopying] = useState<CurlMode | null>(null)
 
   const currentProvider = providers.find((provider) => provider.key === config.provider)
   const effectiveSystem = useMemo(
@@ -193,6 +219,23 @@ export function ModelInputPreview({ defaultOpen = false }: { defaultOpen?: boole
   )
   const previewProtocol = preview?.protocol ?? currentProvider?.api ?? 'internal'
 
+  const handleCopyCurl = async (mode: CurlMode) => {
+    if (!preview || !currentProvider || copying) return
+    setCopying(mode)
+    try {
+      const curl = await apiClient.generateCurl(config.provider, preview.body, mode)
+      await navigator.clipboard.writeText(curl)
+      setCopyStatus(
+        mode === 'stream' ? 'copied stream with key' : 'copied non-stream with key',
+      )
+      setTimeout(() => setCopyStatus(null), 1800)
+    } catch (e) {
+      setCopyStatus((e as Error).message || 'copy failed')
+    } finally {
+      setCopying(null)
+    }
+  }
+
   return (
     <div className="model-input-card rounded border border-zinc-800">
       <button
@@ -209,19 +252,62 @@ export function ModelInputPreview({ defaultOpen = false }: { defaultOpen?: boole
 
       {open && (
         <div className="model-preview p-3 pt-0 space-y-2">
-          {preview && <PreviewBlock label="request body" payload={preview.body} />}
+          {preview && (
+            <PreviewBlock
+              label="request body"
+              payload={preview.body}
+              action={
+                <div className="model-preview-actions">
+                  {copyStatus && (
+                    <span className="model-preview-copy-status">{copyStatus}</span>
+                  )}
+                  <button
+                    className="btn"
+                    disabled={!preview || !currentProvider || !!copying}
+                    onClick={() => handleCopyCurl('stream')}
+                    title={
+                      currentProvider
+                        ? 'Copy streaming cURL matching the debugger run path'
+                        : 'Select a provider to copy cURL'
+                    }
+                  >
+                    {copying === 'stream' ? 'Copying…' : 'Copy Stream'}
+                  </button>
+                  <button
+                    className="btn"
+                    disabled={!preview || !currentProvider || !!copying}
+                    onClick={() => handleCopyCurl('non-stream')}
+                    title={
+                      currentProvider
+                        ? 'Copy non-streaming cURL with the local provider key'
+                        : 'Select a provider to copy cURL'
+                    }
+                  >
+                    {copying === 'non-stream' ? 'Copying…' : 'Copy Non-stream'}
+                  </button>
+                </div>
+              }
+            />
+          )}
         </div>
       )}
     </div>
   )
 }
 
-function PreviewBlock({ label, payload }: PreviewItem) {
+function PreviewBlock({
+  label,
+  payload,
+  action,
+}: PreviewItem & { action?: ReactNode }) {
   const text = useMemo(() => stringify(payload), [payload])
 
   return (
     <div className="model-preview-block">
-      <div className="model-preview-label">{label}</div>
+      <div className="model-preview-label">
+        <span>{label}</span>
+        {action}
+      </div>
       <pre className="model-preview-code scrollbar">{text}</pre>
     </div>
   )

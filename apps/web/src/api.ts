@@ -35,6 +35,21 @@ export async function testProviderModel(
   return data as ProviderTestResponse
 }
 
+export async function generateCurl(
+  provider: string,
+  body: unknown,
+  mode: 'stream' | 'non-stream',
+): Promise<string> {
+  const res = await fetch('/api/curl', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ provider, body, mode }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error ?? `curl failed: ${res.status}`)
+  return data.curl as string
+}
+
 export async function getWorkspace(): Promise<unknown | null> {
   const res = await fetch('/api/workspace')
   if (!res.ok) throw new Error(`workspace get failed: ${res.status}`)

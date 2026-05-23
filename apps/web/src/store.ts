@@ -97,6 +97,7 @@ interface Store {
   truncateAfter: (i: number) => void
 
   addBlock: (msgIdx: number, blockType: string) => void
+  addMockToolResultAfter: (msgIdx: number, blockIdx: number) => void
   removeBlock: (msgIdx: number, blockIdx: number) => void
   updateBlock: (
     msgIdx: number,
@@ -549,6 +550,40 @@ export const useStore = create<Store>()(
               role: 'assistant',
               content: newContent as AssistantContentBlock[],
             }
+          }
+          return { messages: msgs }
+        }),
+
+      addMockToolResultAfter: (msgIdx, blockIdx) =>
+        set((s) => {
+          const source = s.messages[msgIdx]
+          if (!source || source.role !== 'assistant') return s
+          const toolUse = source.content[blockIdx]
+          if (!toolUse || toolUse.type !== 'tool_use' || !toolUse.id) return s
+
+          const resultBlock: UserContentBlock = {
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: '',
+          }
+          const msgs = [...s.messages]
+          const next = msgs[msgIdx + 1]
+          if (next?.role === 'user') {
+            const alreadyExists = next.content.some(
+              (block) =>
+                block.type === 'tool_result' &&
+                block.tool_use_id === toolUse.id,
+            )
+            if (alreadyExists) return s
+            msgs[msgIdx + 1] = {
+              ...next,
+              content: [...next.content, resultBlock],
+            }
+          } else {
+            msgs.splice(msgIdx + 1, 0, {
+              role: 'user',
+              content: [resultBlock],
+            })
           }
           return { messages: msgs }
         }),

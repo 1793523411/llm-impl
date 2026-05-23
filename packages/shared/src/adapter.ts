@@ -76,10 +76,12 @@ export type AnthropicMessageParam = {
 export type AnthropicRequestOptions = {
   max_tokens: number
   temperature?: number
-  thinking?: { type: 'enabled'; budget_tokens: number } | {
-    type: 'adaptive'
-    display: 'summarized'
-  }
+  thinking?:
+    | { type: 'enabled'; budget_tokens: number }
+    | {
+        type: 'adaptive'
+        display: 'summarized'
+      }
   output_config?: { effort: 'high' }
 }
 
@@ -370,7 +372,7 @@ export function toAnthropicRequestOptions(
     options.temperature = config.temperature
   }
 
-  if (config.thinking) {
+  if (config.thinking?.type === 'enabled') {
     if (usesAnthropicAdaptiveThinking(config.model)) {
       options.thinking = { type: 'adaptive', display: 'summarized' }
       options.output_config = { effort: 'high' }

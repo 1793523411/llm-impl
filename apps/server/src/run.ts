@@ -64,6 +64,26 @@ function tokenField(model: string, max: number | undefined) {
     : { max_tokens: max }
 }
 
+function shouldIncludeOpenAIReasoningContent(
+  req: RunRequest,
+  provider: ProviderRecord,
+): boolean {
+  return (
+    req.config.thinking?.type !== 'disabled' &&
+    usesOpenAIReasoningContent(req.config.model, provider.baseUrl)
+  )
+}
+
+function openAIThinkingField(req: RunRequest, provider: ProviderRecord) {
+  if (
+    req.config.thinking?.type === 'disabled' &&
+    usesOpenAIReasoningContent(req.config.model, provider.baseUrl)
+  ) {
+    return { thinking: { type: 'disabled' } }
+  }
+  return {}
+}
+
 type OpenAIResponsesCreateBody = Record<string, unknown>
 type OpenAIResponsesCreateResult = {
   status?: string | null
@@ -165,9 +185,9 @@ export async function runOnce(req: RunRequest): Promise<RunResponse> {
 
   if (provider.api === 'openai-completions') {
     const messages = toOpenAIMessages(req.system, req.messages, {
-      includeReasoningContent: usesOpenAIReasoningContent(
-        req.config.model,
-        provider.baseUrl,
+      includeReasoningContent: shouldIncludeOpenAIReasoningContent(
+        req,
+        provider,
       ),
     })
     const tools =
@@ -179,8 +199,9 @@ export async function runOnce(req: RunRequest): Promise<RunResponse> {
         temperature: req.config.temperature,
       }),
       ...tokenField(req.config.model, req.config.max_tokens),
+      ...openAIThinkingField(req, provider),
       ...(tools && { tools: tools as OpenAI.Chat.ChatCompletionTool[] }),
-    })
+    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming)
     const choice = res.choices[0]
     if (!choice) throw new Error('OpenAI returned no choices')
     return {
@@ -326,9 +347,9 @@ async function* runOpenAIStream(
   start: number,
 ): AsyncGenerator<StreamEvent> {
   const messages = toOpenAIMessages(req.system, req.messages, {
-    includeReasoningContent: usesOpenAIReasoningContent(
-      req.config.model,
-      provider.baseUrl,
+    includeReasoningContent: shouldIncludeOpenAIReasoningContent(
+      req,
+      provider,
     ),
   })
   const tools =
@@ -343,8 +364,9 @@ async function* runOpenAIStream(
       temperature: req.config.temperature,
     }),
     ...tokenField(req.config.model, req.config.max_tokens),
+    ...openAIThinkingField(req, provider),
     ...(tools && { tools: tools as OpenAI.Chat.ChatCompletionTool[] }),
-  })
+  } as OpenAI.Chat.ChatCompletionCreateParamsStreaming)
 
   // We synthesize block events from the chunk stream. Track which non-tool
   // block is currently open (text or thinking) — switching types closes the

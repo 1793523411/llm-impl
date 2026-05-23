@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
-import { Compare } from './Compare'
 import { AlertDialog, ConfirmDialog } from './ui/AppDialog'
 
 type Theme = 'dark' | 'light'
@@ -19,7 +18,6 @@ export function Toolbar() {
   const [importing, setImporting] = useState(false)
   const [importText, setImportText] = useState('')
   const [copyMsg, setCopyMsg] = useState<string | null>(null)
-  const [comparing, setComparing] = useState(false)
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false)
@@ -68,9 +66,6 @@ export function Toolbar() {
         <span aria-hidden>{theme === 'dark' ? '☾' : '☀'}</span>
         {theme === 'dark' ? 'Dark' : 'Light'}
       </button>
-      <button className="btn" onClick={() => setComparing(true)} title="Compare two models on the same conversation">
-        ⇆ Compare
-      </button>
       <button className="btn" onClick={handleCopy} title="Copy current state as JSON">
         Copy JSON
       </button>
@@ -83,8 +78,6 @@ export function Toolbar() {
       >
         Reset
       </button>
-
-      {comparing && <Compare onClose={() => setComparing(false)} />}
 
       <ConfirmDialog
         open={resetConfirmOpen}

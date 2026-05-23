@@ -8,6 +8,28 @@
 NDJSON 流式输出，reasoning 思考块抽取，工具白名单真执行，
 多模型并排对比。
 
+![llm-impl 调试界面示意](docs/fig-debugger-flow.svg)
+
+## 你可以用它做什么
+
+- **断点式调试对话历史**：任意插入、修改、删除 `user` / `assistant` 消息和 content block。
+- **纯模拟工具调用**：手工写 `tool_use` / `tool_result`，不需要真实工具实现也能测 agent 分支。
+- **真执行白名单工具**：对可信内置工具显示 `run` 按钮，执行结果自动回填到 `tool_result`。
+- **复制可运行 cURL**：在 Model Input 里复制带本地 provider key 的请求，支持流式和非流式两种模式。
+- **多模型并排回放**：Compare 会用同一份历史同时跑两个 provider/model，观察输出、latency、thinking 差异。
+
+## cURL 调试
+
+Model Input 面板展示当前 provider/model 的 exact request body，并提供两个复制入口：
+
+- `Copy Stream`：复制和主调试区 `Send` / `Compare` 一致的流式请求。
+- `Copy Non-stream`：复制一次性 JSON 响应请求，适合在终端里快速看完整结果。
+
+生成 cURL 时会由本地 server 读取 `config/providers.json` 里的真实 `apiKey`，
+并按目标协议生成 endpoint / headers / body：
+
+![Copy cURL 生成流程](docs/fig-curl-copy.svg)
+
 ## 文档
 
 按顺序读：

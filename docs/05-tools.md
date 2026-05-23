@@ -8,8 +8,8 @@
 
 **2. 服务端实际能跑的 tool** — 在 `apps/server/src/exec-tool.ts` 写死的白名单。
 默认包含一组基础工具：`get_time` / `run_command` / `read_file` /
-`write_file` / `list_files` / `search_code` / `fetch_url` / `web_fetch` /
-`calculator`。
+`write_file` / `edit_file` / `list_files` / `search_code` / `fetch_url` /
+`web_fetch` / `calculator`。
 
 两者**通过 name 字段对应**：你定义一个 `calculator` 工具给模型，模型决定调它，
 如果服务端白名单里也有同名 `calculator`，前端就显示 ▶ run 按钮可一键真执行。
@@ -51,6 +51,18 @@
    点一下 → POST `/api/exec-tool` → server 执行 → content 自动填好
 6. Send 让模型基于 result 继续
 
+## 纯模拟工具调用
+
+右侧交互区可以手工模拟工具，不需要左侧 `Tools` 里配置这个工具：
+
+1. 在 assistant 消息里添加 `tool_use`
+2. `tool` 使用 `Pick` 从已有工具下拉选择，或切到 `Custom` 输入任意 mock 工具名
+3. 点 `+ mock result` 自动在下一条 user 消息里创建匹配的 `tool_result`
+4. 手填 `tool_result.content`，不要点 `▶ run`
+5. Send 后模型会把这组内容当成已发生的工具调用结果
+
+没有配置为可执行的工具会显示 `mock` 标记，也不会出现服务端执行按钮。
+
 ## 真执行白名单
 
 `apps/server/src/exec-tool.ts` 里定义。每条结构：
@@ -72,6 +84,7 @@
 | `run_command` | 执行本地 shell 命令，适合调试 skill 里的 bash/script | 默认 sandbox；工作目录必须在 allowlist 内；macOS 下用 `sandbox-exec` 限制写入范围并禁用网络；危险系统命令拦截；默认 60s 超时，输出截断 |
 | `read_file` | 读取本地文本文件，带行号 | 只能读 allowlist 内路径；大文件需要 `offset` / `limit` |
 | `write_file` | 创建或覆盖本地 UTF-8 文本文件 | 只能写 sandbox 可写根；默认不覆盖已有文件，默认不创建父目录；单次最多 512KiB |
+| `edit_file` | 精确替换本地 UTF-8 文本文件中的片段 | 只能编辑 sandbox 可写根内已有文件；默认要求 `old_text` 只匹配一次；支持 `dry_run` 和 `expected_replacements`；单文件最多 512KiB |
 | `list_files` | 列目录、按 glob 过滤 | 只能列 allowlist 内路径；自动跳过 `node_modules` / `.git` 等噪音目录 |
 | `search_code` | 本地代码 regex / symbol 搜索 | 只能搜 allowlist 内路径；优先 `rg`，失败回退 `grep`，输出截断 |
 | `fetch_url` | GET 一个 URL，返回 text/html/json | 限 http(s)，15s 超时，最大 128KB |
@@ -86,7 +99,7 @@
 - 额外允许根：设置环境变量 `LLM_IMPL_ALLOWED_ROOTS`，多个路径用系统 path delimiter 分隔
 - `sandbox_mode: "workspace-write"`：允许写 `working_directory` 和临时目录
 - `sandbox_mode: "read-only"`：不允许写 `working_directory`，但仍允许写临时目录，避免多数解释器启动失败
-- `write_file` 在 `workspace-write` 下允许写 allowlist / writable roots / 临时目录；在 `read-only` 下只允许写 writable roots / 临时目录
+- `write_file` / `edit_file` 在 `workspace-write` 下允许写 allowlist / writable roots / 临时目录；在 `read-only` 下只允许写 writable roots / 临时目录
 - macOS sandbox 默认禁用网络访问，并拒绝命令里直接引用 allowlist 外的绝对路径
 - macOS 有 `/usr/bin/sandbox-exec` 时会使用 OS sandbox；其他系统退化为路径 allowlist + 精简环境变量 + 危险命令拦截
 
@@ -94,7 +107,7 @@
 
 1. server 全局默认：repo / skills / `LLM_IMPL_ALLOWED_ROOTS`
 2. case JSON 的 `sandbox` 字段：当前 case 内所有内置工具执行都会继承
-3. 单次内置工具 `input`：只影响这一条工具调用。`run_command` / `write_file` 支持常用 sandbox 覆盖字段
+3. 单次内置工具 `input`：只影响这一条工具调用。`run_command` / `write_file` / `edit_file` 支持常用 sandbox 覆盖字段
 
 case 级示例：
 
@@ -143,6 +156,24 @@ case 级示例：
     "content": "ok\n",
     "create_dirs": true,
     "overwrite": false,
+    "sandbox_mode": "read-only",
+    "sandbox_writable_roots": ["/tmp/llm-impl-check-output"]
+  }
+}
+```
+
+`edit_file` 示例：
+
+```json
+{
+  "type": "tool_use",
+  "name": "edit_file",
+  "input": {
+    "path": "/tmp/llm-impl-check-output/result.txt",
+    "old_text": "status=pending",
+    "new_text": "status=done",
+    "expected_replacements": 1,
+    "dry_run": false,
     "sandbox_mode": "read-only",
     "sandbox_writable_roots": ["/tmp/llm-impl-check-output"]
   }

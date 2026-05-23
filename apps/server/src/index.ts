@@ -25,6 +25,7 @@ import { readWorkspace, writeWorkspace } from './workspace'
 import { execTool, listTools } from './exec-tool'
 import { callMcpTool, listMcpTools } from './mcp'
 import { listSkills, loadSkillContent } from './skills'
+import { buildRunnableCurl } from './curl'
 
 const app = new Hono()
 
@@ -34,6 +35,24 @@ app.use('/api/*', cors())
 app.get('/api/health', (c) => c.json({ ok: true }))
 
 app.get('/api/providers', (c) => c.json(publicProviders()))
+
+app.post('/api/curl', async (c) => {
+  const body = (await c.req.json().catch(() => null)) as
+    | { provider?: unknown; body?: unknown; mode?: unknown }
+    | null
+  const provider = typeof body?.provider === 'string' ? body.provider : ''
+  const mode = body?.mode === 'stream' ? 'stream' : 'non-stream'
+  if (!provider) return c.json({ error: 'missing provider' }, 400)
+  if (!body || !Object.prototype.hasOwnProperty.call(body, 'body')) {
+    return c.json({ error: 'missing request body' }, 400)
+  }
+
+  try {
+    return c.json({ curl: buildRunnableCurl(provider, body.body, mode) })
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400)
+  }
+})
 
 app.post('/api/providers/test', async (c) => {
   const body = await c.req.json().catch(() => null)
