@@ -1,9 +1,12 @@
+import { memo, useEffect, useRef, useState } from 'react'
 import type {
   AssistantContentBlock,
   Message,
   UserContentBlock,
 } from '@llm-impl/shared'
 import { useStore } from '../store'
+import { MarkdownPreview } from './MarkdownPreview'
+import { Select } from './ui/Select'
 
 const roleStyles = {
   user: 'border-blue-900 bg-blue-950/20',
@@ -15,7 +18,13 @@ const roleLabel = {
   assistant: { text: 'assistant', cls: 'text-purple-400' },
 } as const
 
-export function MessageCard({ message, index }: { message: Message; index: number }) {
+export const MessageCard = memo(function MessageCard({
+  message,
+  index,
+}: {
+  message: Message
+  index: number
+}) {
   const removeMessage = useStore((s) => s.removeMessage)
   const truncateAfter = useStore((s) => s.truncateAfter)
   const addBlock = useStore((s) => s.addBlock)
@@ -57,7 +66,7 @@ export function MessageCard({ message, index }: { message: Message; index: numbe
       </div>
     </div>
   )
-}
+})
 
 function BlockAdder({
   msgIdx,
@@ -69,7 +78,9 @@ function BlockAdder({
   addBlock: (msgIdx: number, blockType: string) => void
 }) {
   const types =
-    role === 'user' ? ['text', 'tool_result'] : ['text', 'tool_use', 'thinking']
+    role === 'user'
+      ? ['text', 'image', 'tool_result']
+      : ['text', 'tool_use', 'thinking']
   return (
     <div className="flex gap-1 flex-wrap">
       {types.map((t) => (
@@ -101,15 +112,12 @@ function BlockEditor({
 
   if (block.type === 'text') {
     return (
-      <BlockShell label="text" onRemove={() => removeBlock(msgIdx, blockIdx)}>
-        <textarea
-          className="field-area"
-          rows={role === 'user' ? 2 : 3}
-          placeholder={role === 'user' ? 'user message...' : 'assistant text...'}
-          value={block.text}
-          onChange={(e) => updateBlock(msgIdx, blockIdx, { text: e.target.value })}
-        />
-      </BlockShell>
+      <TextBlockEditor
+        text={block.text}
+        role={role}
+        onRemove={() => removeBlock(msgIdx, blockIdx)}
+        onChange={(text) => updateBlock(msgIdx, blockIdx, { text })}
+      />
     )
   }
 
@@ -117,6 +125,8 @@ function BlockEditor({
     return (
       <ToolUseBlockEditor
         block={block}
+        msgIdx={msgIdx}
+        blockIdx={blockIdx}
         onChange={(patch) => updateBlock(msgIdx, blockIdx, patch)}
         onRemove={() => removeBlock(msgIdx, blockIdx)}
       />
@@ -162,9 +172,22 @@ function BlockEditor({
   if (block.type === 'image') {
     return (
       <BlockShell label="image" onRemove={() => removeBlock(msgIdx, blockIdx)}>
-        <div className="text-xs text-zinc-500">
-          [image, {block.source.media_type}, {block.source.data.length} chars base64]
-        </div>
+        {block.source.type === 'url' ? (
+          <input
+            className="field text-xs"
+            placeholder="https://example.com/image.png"
+            value={block.source.url}
+            onChange={(e) =>
+              updateBlock(msgIdx, blockIdx, {
+                source: { type: 'url', url: e.target.value },
+              })
+            }
+          />
+        ) : (
+          <div className="text-xs text-zinc-500">
+            [image, {block.source.media_type}, {block.source.data.length} chars base64]
+          </div>
+        )}
       </BlockShell>
     )
   }
@@ -176,26 +199,92 @@ function BlockShell({
   label,
   accent = 'text-zinc-500',
   onRemove,
+  actions,
   children,
 }: {
   label: string
   accent?: string
   onRemove: () => void
+  actions?: React.ReactNode
   children: React.ReactNode
 }) {
   return (
     <div className="rounded border border-zinc-800 bg-zinc-950/50 p-2">
       <div className="flex items-center justify-between mb-1">
         <span className={`text-[10px] uppercase tracking-wider ${accent}`}>{label}</span>
-        <button
-          className="btn-ghost text-[10px] text-zinc-600 hover:text-red-400"
-          onClick={onRemove}
-        >
-          ✕
-        </button>
+        <div className="flex items-center gap-1">
+          {actions}
+          <button
+            className="btn-ghost text-[10px] text-zinc-600 hover:text-red-400"
+            onClick={onRemove}
+          >
+            ✕
+          </button>
+        </div>
       </div>
       {children}
     </div>
+  )
+}
+
+function PreviewToggle({
+  mode,
+  onChange,
+}: {
+  mode: 'edit' | 'preview'
+  onChange: (mode: 'edit' | 'preview') => void
+}) {
+  return (
+    <div className="markdown-preview-toggle" role="tablist" aria-label="Markdown view">
+      <button
+        className={mode === 'edit' ? 'is-active' : ''}
+        onClick={() => onChange('edit')}
+      >
+        Edit
+      </button>
+      <button
+        className={mode === 'preview' ? 'is-active' : ''}
+        onClick={() => onChange('preview')}
+      >
+        Preview
+      </button>
+    </div>
+  )
+}
+
+function TextBlockEditor({
+  text,
+  role,
+  onRemove,
+  onChange,
+}: {
+  text: string
+  role: 'user' | 'assistant'
+  onRemove: () => void
+  onChange: (text: string) => void
+}) {
+  const [mode, setMode] = useState<'edit' | 'preview'>(
+    role === 'assistant' ? 'preview' : 'edit',
+  )
+
+  return (
+    <BlockShell
+      label="text"
+      onRemove={onRemove}
+      actions={<PreviewToggle mode={mode} onChange={setMode} />}
+    >
+      {mode === 'preview' ? (
+        <MarkdownPreview>{text}</MarkdownPreview>
+      ) : (
+        <textarea
+          className="field-area"
+          rows={role === 'user' ? 2 : 3}
+          placeholder={role === 'user' ? 'user message...' : 'assistant text...'}
+          value={text}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </BlockShell>
   )
 }
 
@@ -212,32 +301,70 @@ function ToolResultBlockEditor({
   onRemove: () => void
   onChange: (patch: Partial<Extract<UserContentBlock, { type: 'tool_result' }>>) => void
 }) {
+  const [mode, setMode] = useState<'edit' | 'preview'>('edit')
   const messages = useStore((s) => s.messages)
   const execTools = useStore((s) => s.execTools)
+  const skills = useStore((s) => s.skills)
+  const mcpServers = useStore((s) => s.mcpServers)
+  const canRunTool = useStore((s) => s.canRunTool)
   const runRegisteredTool = useStore((s) => s.runRegisteredTool)
+  void execTools
+  void skills
+  void mcpServers
 
   // resolve the tool_use this is a result for (for the ▶ run button)
   let matchingToolName: string | undefined
+  let matchingToolInput: Record<string, unknown> | undefined
   for (const m of messages) {
     if (m.role !== 'assistant') continue
     for (const b of m.content) {
       if (b.type === 'tool_use' && b.id === block.tool_use_id) {
         matchingToolName = b.name
+        matchingToolInput = b.input
       }
     }
   }
   const canRun =
-    !!matchingToolName && execTools.some((t) => t.name === matchingToolName)
+    !!matchingToolName && canRunTool(matchingToolName)
 
   return (
-    <BlockShell label="tool_result" accent="text-amber-400" onRemove={onRemove}>
+    <BlockShell
+      label="tool_result"
+      accent="text-amber-400"
+      onRemove={onRemove}
+      actions={<PreviewToggle mode={mode} onChange={setMode} />}
+    >
+      {matchingToolName && (
+        <div className="tool-call-summary">
+          <span>matches</span>
+          <code>{matchingToolName}</code>
+          {!canRun && (
+            <span className="tool-status" title="Manual/mock result">
+              mock
+            </span>
+          )}
+        </div>
+      )}
+      {matchingToolInput && (
+        <details className="mt-1">
+          <summary className="cursor-pointer text-[10px] uppercase tracking-wider text-zinc-500">
+            input params
+          </summary>
+          <pre className="tool-schema-preview scrollbar">
+            {JSON.stringify(matchingToolInput, null, 2)}
+          </pre>
+        </details>
+      )}
       <div className="flex gap-1">
-        <input
-          className="field text-xs flex-1"
-          placeholder="tool_use_id"
-          value={block.tool_use_id}
-          onChange={(e) => onChange({ tool_use_id: e.target.value })}
-        />
+        <label className="tool-call-id-field flex-1">
+          <span>call id</span>
+          <input
+            className="field text-xs"
+            placeholder="tool_use_id"
+            value={block.tool_use_id}
+            onChange={(e) => onChange({ tool_use_id: e.target.value })}
+          />
+        </label>
         {canRun && (
           <button
             className="btn"
@@ -248,13 +375,19 @@ function ToolResultBlockEditor({
           </button>
         )}
       </div>
-      <textarea
-        className={`field-area mt-1 ${block.is_error ? 'border-red-700' : ''}`}
-        rows={3}
-        placeholder="tool result content..."
-        value={block.content}
-        onChange={(e) => onChange({ content: e.target.value })}
-      />
+      {mode === 'preview' ? (
+        <MarkdownPreview className={`mt-1 ${block.is_error ? 'is-error' : ''}`}>
+          {block.content}
+        </MarkdownPreview>
+      ) : (
+        <textarea
+          className={`field-area mt-1 ${block.is_error ? 'border-red-700' : ''}`}
+          rows={3}
+          placeholder="tool result content..."
+          value={block.content}
+          onChange={(e) => onChange({ content: e.target.value })}
+        />
+      )}
       <label className="flex items-center gap-2 text-xs mt-1 text-zinc-400">
         <input
           type="checkbox"
@@ -269,46 +402,182 @@ function ToolResultBlockEditor({
 
 function ToolUseBlockEditor({
   block,
+  msgIdx,
+  blockIdx,
   onChange,
   onRemove,
 }: {
   block: Extract<AssistantContentBlock, { type: 'tool_use' }>
+  msgIdx: number
+  blockIdx: number
   onChange: (patch: Partial<Extract<AssistantContentBlock, { type: 'tool_use' }>>) => void
   onRemove: () => void
 }) {
-  const inputText = JSON.stringify(block.input, null, 2)
+  const [inputText, setInputText] = useState(() =>
+    JSON.stringify(block.input, null, 2),
+  )
+  const [inputError, setInputError] = useState<string | null>(null)
+  const [toolNameMode, setToolNameMode] = useState<'pick' | 'custom'>('pick')
+  const lastSyncedBlockIdRef = useRef(block.id)
+  const lastSyncedInputRef = useRef(JSON.stringify(block.input, null, 2))
+  const tools = useStore((s) => s.tools)
+  const skills = useStore((s) => s.skills)
+  const mcpServers = useStore((s) => s.mcpServers)
+  const messages = useStore((s) => s.messages)
+  const getEffectiveTools = useStore((s) => s.getEffectiveTools)
+  const addMockToolResultAfter = useStore((s) => s.addMockToolResultAfter)
+  const effectiveTools = getEffectiveTools()
+  const isConfiguredTool = effectiveTools.some((tool) => tool.name === block.name)
+  const toolNameOptions = effectiveTools.some((tool) => tool.name === block.name)
+    ? effectiveTools
+    : block.name
+      ? [
+          {
+            name: block.name,
+            description: 'custom/mock tool name',
+            input_schema: {},
+          },
+          ...effectiveTools,
+        ]
+      : effectiveTools
+  const toolNameListId = `tool-name-options-${block.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`
+  const nextMessage = messages[msgIdx + 1]
+  const hasMockResult =
+    nextMessage?.role === 'user' &&
+    nextMessage.content.some(
+      (item) => item.type === 'tool_result' && item.tool_use_id === block.id,
+    )
+  void tools
+  void skills
+  void mcpServers
+
+  const serializedInput = JSON.stringify(block.input, null, 2)
+
+  useEffect(() => {
+    const isNewBlock = lastSyncedBlockIdRef.current !== block.id
+    const localIsSynced = inputText === lastSyncedInputRef.current
+    if (isNewBlock || localIsSynced) {
+      setInputText(serializedInput)
+      setInputError(null)
+    }
+    if (isNewBlock) setToolNameMode(block.name && !isConfiguredTool ? 'custom' : 'pick')
+    lastSyncedBlockIdRef.current = block.id
+    lastSyncedInputRef.current = serializedInput
+  }, [block.id, block.name, inputText, isConfiguredTool, serializedInput])
+
+  useEffect(() => {
+    if (block.name && !isConfiguredTool && toolNameMode === 'pick') {
+      setToolNameMode('custom')
+    }
+  }, [block.name, isConfiguredTool, toolNameMode])
 
   return (
-    <BlockShell label="tool_use" accent="text-emerald-400" onRemove={onRemove}>
-      <div className="grid grid-cols-2 gap-1">
-        <input
-          className="field text-xs"
-          placeholder="name"
-          value={block.name}
-          onChange={(e) => onChange({ name: e.target.value })}
-        />
-        <input
-          className="field text-xs"
-          placeholder="id"
-          value={block.id}
-          onChange={(e) => onChange({ id: e.target.value })}
-        />
+    <BlockShell
+      label="tool_use"
+      accent="text-emerald-400"
+      onRemove={onRemove}
+      actions={
+        <button
+          className="btn-ghost text-[10px] text-zinc-500 hover:text-zinc-300"
+          disabled={!block.id || hasMockResult}
+          onClick={() => addMockToolResultAfter(msgIdx, blockIdx)}
+          title={
+            hasMockResult
+              ? 'A matching tool_result already exists in the next user message'
+              : 'Insert a matching tool_result in the next user message'
+          }
+        >
+          {hasMockResult ? 'mock result exists' : '+ mock result'}
+        </button>
+      }
+    >
+      <div className="space-y-1">
+        <div className="tool-name-row">
+          <div className="tool-call-id-field flex-1">
+            <span>tool</span>
+            {toolNameMode === 'pick' ? (
+              <Select
+                value={block.name}
+                onChange={(name) => onChange({ name })}
+                placeholder="pick configured tool"
+                options={toolNameOptions.map((tool) => ({
+                  value: tool.name,
+                  label: tool.name,
+                  searchText: `${tool.name} ${tool.description ?? ''}`,
+                }))}
+              />
+            ) : (
+              <>
+                <input
+                  className="field text-xs"
+                  list={toolNameListId}
+                  placeholder="custom/mock tool name"
+                  value={block.name}
+                  onChange={(e) => onChange({ name: e.target.value })}
+                />
+                <datalist id={toolNameListId}>
+                  {effectiveTools.map((tool) => (
+                    <option key={tool.name} value={tool.name} />
+                  ))}
+                </datalist>
+              </>
+            )}
+          </div>
+          <div className="markdown-preview-toggle" role="tablist" aria-label="Tool name mode">
+            <button
+              className={toolNameMode === 'pick' ? 'is-active' : ''}
+              onClick={() => setToolNameMode('pick')}
+            >
+              Pick
+            </button>
+            <button
+              className={toolNameMode === 'custom' ? 'is-active' : ''}
+              onClick={() => setToolNameMode('custom')}
+            >
+              Custom
+            </button>
+          </div>
+          {block.name && !isConfiguredTool && (
+            <span className="tool-status" title="Manual/mock tool name">
+              mock
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="mt-1">
+        <label className="tool-call-id-field">
+          <span>call id</span>
+          <input
+            className="field text-xs"
+            placeholder="provider-generated id"
+            value={block.id}
+            onChange={(e) => onChange({ id: e.target.value })}
+          />
+        </label>
       </div>
       <div className="mt-1">
         <div className="label mb-0.5">input (JSON)</div>
         <textarea
-          className="field-area font-mono text-xs"
+          className={`field-area font-mono text-xs ${inputError ? 'border-red-700' : ''}`}
           rows={3}
-          defaultValue={inputText}
-          onBlur={(e) => {
+          value={inputText}
+          onChange={(e) => {
+            const value = e.target.value
+            setInputText(value)
             try {
-              const parsed = JSON.parse(e.target.value || '{}')
+              const parsed = JSON.parse(value || '{}')
+              setInputError(null)
               onChange({ input: parsed })
-            } catch {
-              /* keep raw text in textarea, but don't update state */
+            } catch (err) {
+              setInputError((err as Error).message)
             }
           }}
         />
+        {inputError && (
+          <div className="mt-1 text-xs text-red-400">
+            Invalid JSON; the last valid input is what will be sent.
+          </div>
+        )}
       </div>
     </BlockShell>
   )

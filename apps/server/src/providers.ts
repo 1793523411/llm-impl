@@ -9,8 +9,6 @@ export type ProviderRecord = {
   models: ModelInfo[]
 }
 
-let cache: Record<string, ProviderRecord> | null = null
-
 function configPath(): string {
   return path.resolve(
     process.env.PROVIDERS_CONFIG ?? './config/providers.json',
@@ -18,19 +16,53 @@ function configPath(): string {
 }
 
 export function loadProviders(): Record<string, ProviderRecord> {
-  if (cache) return cache
   const p = configPath()
   try {
-    const raw = readFileSync(p, 'utf8')
-    const parsed = JSON.parse(raw)
-    cache = (parsed.providers ?? parsed) as Record<string, ProviderRecord>
-    const keys = Object.keys(cache)
-    console.log(`[providers] loaded ${keys.length} provider(s) from ${p}: ${keys.join(', ')}`)
+    return loadProvidersFile(p)
   } catch (e) {
     console.warn(`[providers] could not load ${p}: ${(e as Error).message}`)
-    cache = {}
+    return {}
   }
-  return cache
+}
+
+function loadProvidersFile(
+  filePath: string,
+  seen = new Set<string>(),
+): Record<string, ProviderRecord> {
+  const absPath = path.resolve(filePath)
+  if (seen.has(absPath)) {
+    throw new Error(`circular providers include: ${absPath}`)
+  }
+  seen.add(absPath)
+
+  const raw = readFileSync(absPath, 'utf8')
+  const parsed = JSON.parse(raw) as {
+    include?: string
+    includes?: string[]
+    providers?: Record<string, ProviderRecord>
+    models?: { providers?: Record<string, ProviderRecord> }
+  } & Record<string, ProviderRecord>
+
+  const providers: Record<string, ProviderRecord> = {}
+  const includes = [
+    ...(parsed.include ? [parsed.include] : []),
+    ...(parsed.includes ?? []),
+  ]
+  for (const include of includes) {
+    Object.assign(
+      providers,
+      loadProvidersFile(path.resolve(path.dirname(absPath), include), seen),
+    )
+  }
+
+  const ownProviders =
+    parsed.providers ??
+    parsed.models?.providers ??
+    (includes.length > 0 ? {} : parsed)
+  Object.assign(providers, ownProviders)
+
+  seen.delete(absPath)
+  return providers
 }
 
 export function publicProviders(): ProviderInfo[] {

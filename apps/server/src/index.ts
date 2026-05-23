@@ -2,12 +2,30 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 import { stream as honoStream } from 'hono/streaming'
-import { ExecToolRequest, RunRequest } from '@llm-impl/shared'
+import {
+  ExecToolRequest,
+  McpCallToolRequest,
+  McpListToolsRequest,
+  ProviderTestRequest,
+  RunRequest,
+  SkillListRequest,
+  SkillLoadRequest,
+} from '@llm-impl/shared'
 import { runOnce, runStream } from './run'
-import { listCases, readCase, writeCase, deleteCase } from './cases'
+import {
+  listCases,
+  readCase,
+  writeCase,
+  deleteCase,
+  createCaseDir,
+  moveCaseEntry,
+} from './cases'
 import { publicProviders } from './providers'
 import { readWorkspace, writeWorkspace } from './workspace'
 import { execTool, listTools } from './exec-tool'
+import { callMcpTool, listMcpTools } from './mcp'
+import { listSkills, loadSkillContent } from './skills'
+import { buildRunnableCurl } from './curl'
 
 const app = new Hono()
 
@@ -18,7 +36,102 @@ app.get('/api/health', (c) => c.json({ ok: true }))
 
 app.get('/api/providers', (c) => c.json(publicProviders()))
 
+app.post('/api/curl', async (c) => {
+  const body = (await c.req.json().catch(() => null)) as
+    | { provider?: unknown; body?: unknown; mode?: unknown }
+    | null
+  const provider = typeof body?.provider === 'string' ? body.provider : ''
+  const mode = body?.mode === 'stream' ? 'stream' : 'non-stream'
+  if (!provider) return c.json({ error: 'missing provider' }, 400)
+  if (!body || !Object.prototype.hasOwnProperty.call(body, 'body')) {
+    return c.json({ error: 'missing request body' }, 400)
+  }
+
+  try {
+    return c.json({ curl: buildRunnableCurl(provider, body.body, mode) })
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400)
+  }
+})
+
+app.post('/api/providers/test', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const parsed = ProviderTestRequest.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400)
+  }
+
+  const started = Date.now()
+  try {
+    const result = await runOnce({
+      config: {
+        provider: parsed.data.provider,
+        model: parsed.data.model,
+        max_tokens: 64,
+        stream: false,
+      },
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Reply with exactly: ok' }],
+        },
+      ],
+    })
+    const sample = result.message.content
+      .map((block) => {
+        if (block.type === 'text') return block.text
+        if (block.type === 'thinking') return block.thinking
+        return `[${block.type}]`
+      })
+      .join('\n')
+      .slice(0, 200)
+    return c.json({
+      ok: true,
+      latency_ms: result.latency_ms,
+      stop_reason: result.stop_reason,
+      usage: result.usage,
+      sample,
+    })
+  } catch (e) {
+    const err = e as Error & { error?: unknown }
+    return c.json({
+      ok: false,
+      latency_ms: Date.now() - started,
+      error: err.message ?? 'test failed',
+      provider_error: err.error ?? null,
+    })
+  }
+})
+
 app.get('/api/exec-tools', (c) => c.json(listTools()))
+
+app.post('/api/skills/list', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const parsed = SkillListRequest.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ ok: false, error: 'invalid request', issues: parsed.error.issues }, 400)
+  }
+  try {
+    const skills = await listSkills(parsed.data.roots)
+    return c.json({ ok: true, skills })
+  } catch (e) {
+    return c.json({ ok: false, error: (e as Error).message }, 500)
+  }
+})
+
+app.post('/api/skills/load', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const parsed = SkillLoadRequest.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ content: 'invalid request', is_error: true }, 400)
+  }
+  try {
+    const content = await loadSkillContent(parsed.data.skill)
+    return c.json({ content })
+  } catch (e) {
+    return c.json({ content: (e as Error).message, is_error: true })
+  }
+})
 
 app.post('/api/exec-tool', async (c) => {
   const body = await c.req.json().catch(() => null)
@@ -26,7 +139,39 @@ app.post('/api/exec-tool', async (c) => {
   if (!parsed.success) {
     return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400)
   }
-  const result = await execTool(parsed.data.name, parsed.data.input ?? {})
+  const result = await execTool(
+    parsed.data.name,
+    parsed.data.input ?? {},
+    parsed.data.sandbox,
+  )
+  return c.json(result)
+})
+
+app.post('/api/mcp/list-tools', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const parsed = McpListToolsRequest.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ ok: false, error: 'invalid request', issues: parsed.error.issues }, 400)
+  }
+  try {
+    const result = await listMcpTools(parsed.data.server)
+    return c.json({ ok: true, ...result })
+  } catch (e) {
+    return c.json({ ok: false, error: (e as Error).message }, 500)
+  }
+})
+
+app.post('/api/mcp/call-tool', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const parsed = McpCallToolRequest.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400)
+  }
+  const result = await callMcpTool(
+    parsed.data.server,
+    parsed.data.toolName,
+    parsed.data.input ?? {},
+  )
   return c.json(result)
 })
 
@@ -84,6 +229,33 @@ app.put('/api/workspace', async (c) => {
 
 app.get('/api/cases', async (c) => {
   return c.json(await listCases())
+})
+
+app.post('/api/case-dirs', async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { path?: unknown } | null
+  const dirPath = typeof body?.path === 'string' ? body.path.trim() : ''
+  if (!dirPath) return c.json({ error: 'missing path' }, 400)
+  try {
+    await createCaseDir(dirPath)
+    return c.json({ ok: true })
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400)
+  }
+})
+
+app.post('/api/cases/move', async (c) => {
+  const body = (await c.req.json().catch(() => null)) as
+    | { from?: unknown; to?: unknown }
+    | null
+  const from = typeof body?.from === 'string' ? body.from.trim() : ''
+  const to = typeof body?.to === 'string' ? body.to.trim() : ''
+  if (!from || !to) return c.json({ error: 'missing path' }, 400)
+  try {
+    const ok = await moveCaseEntry(from, to)
+    return c.json({ ok })
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400)
+  }
 })
 
 app.get('/api/cases/*', async (c) => {

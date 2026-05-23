@@ -2,6 +2,8 @@
 
 ## 三栏布局
 
+![核心调试界面截图](screenshot-debugger.png)
+
 ```
 ┌─────────┬──────────────────────────────────┬──────────┐
 │ Cases   │  Toolbar (顶部)                  │ Config   │
@@ -30,6 +32,35 @@
 - `thinking` — 思考过程（仅推理模型会有）
 
 每个 block 都是一个普通受控表单——改它就是改它。没有"草稿"和"已发送"的区别。
+
+![消息回放与手工 tool_result 截图](screenshot-message-replay.png)
+
+## Model Input 与 cURL
+
+左侧 `Model Input` 面板展示当前 provider/model 会收到的 request body。它不是 case JSON，
+而是已经经过协议适配后的模型 API 入参。
+
+面板里有两个复制按钮：
+
+| 按钮 | 用途 |
+|---|---|
+| `Copy Stream` | 复制流式 cURL，和右侧主调试区 `Send` / `Compare` 的执行路径一致 |
+| `Copy Non-stream` | 复制非流式 cURL，去掉 `stream` / `stream_options`，方便在终端一次性看完整 JSON |
+
+cURL 由本地 `/api/curl` 生成，会读取 `config/providers.json` 里的 provider key，
+并按当前 provider 协议自动处理：
+
+- Anthropic Messages：`/v1/messages`，`x-api-key` + `anthropic-version`
+- OpenAI Chat Completions / DeepSeek：`/chat/completions`，`Authorization: Bearer ...`
+- OpenAI Responses：`/responses`
+
+为了让复制出来的命令更接近"可直接运行"的重放请求，生成器还会做两类修正：
+
+- 裁掉末尾已有的 assistant 回答，避免把当前 case 里已经生成的答案当成 prefill 发出去
+- DeepSeek reasoning 模型遇到历史 `tool_use` 缺少 `reasoning_content` 时，自动加
+  `thinking: { "type": "disabled" }`，保留 tool-call 历史但不伪造思考过程
+
+![Model Input cURL 复制截图](screenshot-model-input-curl.png)
 
 ## 一次完整的调试循环
 
@@ -68,7 +99,7 @@
 
 | 按钮 | 用途 |
 |---|---|
-| `⇆ Compare` | 打开多模型对比 modal（[第 7 章](07-compare.md)） |
+| `⇆ Compare Case` | 在当前 case / draft 上打开多模型对比 modal（[第 7 章](07-compare.md)） |
 | `Copy JSON` | 当前完整状态拷到剪贴板 |
 | `Import JSON` | 弹层粘贴 JSON 加载（覆盖当前状态） |
 | `Reset` | 清空 messages，保留 config / system / tools |

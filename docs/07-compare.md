@@ -12,11 +12,18 @@
 
 ## 怎么用
 
-1. 顶栏点 **⇆ Compare**
+1. 在底部发送栏点 **⇆ Compare Case**（未保存时显示 **⇆ Compare Draft**）
 2. 弹出全屏 modal，两栏 A / B
 3. 每栏顶部有 provider + model 下拉（A 默认是当前主配置，B 默认选一个不同 provider）
 4. 点 **▶ Run both**
 5. 两边同时流式输出，可以观察哪边先吐 token、哪边 latency 低、哪边 reasoning 长
+
+如果当前 case 已经有最后一条 assistant 输出，Compare 会自动裁掉尾部 assistant turn，再把剩余历史发给模型；也就是"重放当前 case 的下一条回答"，避免把已有答案当成 assistant prefill 发给不支持 prefill 的模型。
+
+DeepSeek thinking 模型如果遇到历史里的 `assistant tool_use` 缺少 `reasoning_content`，Compare 会自动关闭本次重放的 thinking mode，保留标准 tool-call / tool-result 历史继续跑。这样不会伪造 reasoning，也不会把工具结果拍平成普通文本。
+
+Model Input 的 `Copy Stream` / `Copy Non-stream` 复用了同类适配思路：同一份 case 在切换 provider/model 后，
+cURL 会按目标协议重新组织 endpoint、headers、stream 字段和 replay body，而不是盲目复制旧模型的请求格式。
 
 ```
 ┌──────────────────────────────────────────────────┐

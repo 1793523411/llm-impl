@@ -3,8 +3,16 @@ import OpenAI from 'openai'
 import {
   fromAnthropicContent,
   fromOpenAIMessage,
+  fromOpenAIResponse,
+  toAnthropicMessages,
+  toAnthropicRequestOptions,
+  toAnthropicTools,
   toOpenAIMessages,
+  toOpenAIResponsesInput,
+  toOpenAIResponsesTools,
   toOpenAITools,
+  usesOpenAIReasoningContent,
+  type OpenAIResponseLoose,
   type RunRequest,
   type RunResponse,
   type StreamEvent,
@@ -56,30 +64,109 @@ function tokenField(model: string, max: number | undefined) {
     : { max_tokens: max }
 }
 
+function shouldIncludeOpenAIReasoningContent(
+  req: RunRequest,
+  provider: ProviderRecord,
+): boolean {
+  return (
+    req.config.thinking?.type !== 'disabled' &&
+    usesOpenAIReasoningContent(req.config.model, provider.baseUrl)
+  )
+}
+
+function openAIThinkingField(req: RunRequest, provider: ProviderRecord) {
+  if (
+    req.config.thinking?.type === 'disabled' &&
+    usesOpenAIReasoningContent(req.config.model, provider.baseUrl)
+  ) {
+    return { thinking: { type: 'disabled' } }
+  }
+  return {}
+}
+
+type OpenAIResponsesCreateBody = Record<string, unknown>
+type OpenAIResponsesCreateResult = {
+  status?: string | null
+  error?: { message?: string | null } | null
+  output_text?: string
+  output?: unknown[]
+  usage?: {
+    input_tokens?: number
+    output_tokens?: number
+    input_tokens_details?: { cached_tokens?: number }
+  } | null
+}
+
+type OpenAIResponsesClient = {
+  responses: {
+    create: (body: OpenAIResponsesCreateBody) => Promise<OpenAIResponsesCreateResult>
+  }
+}
+
+function openaiResponsesClient(p: ProviderRecord): OpenAIResponsesClient {
+  return openaiClient(p) as unknown as OpenAIResponsesClient
+}
+
+async function runOpenAIResponsesOnce(
+  req: RunRequest,
+  provider: ProviderRecord,
+  start: number,
+): Promise<RunResponse> {
+  const tools =
+    req.tools && req.tools.length > 0
+      ? toOpenAIResponsesTools(req.tools)
+      : undefined
+  const res = await openaiResponsesClient(provider).responses.create({
+    model: req.config.model,
+    input: toOpenAIResponsesInput(req.messages),
+    ...(req.system && { instructions: req.system }),
+    ...(req.config.temperature !== undefined && {
+      temperature: req.config.temperature,
+    }),
+    ...(req.config.max_tokens !== undefined && {
+      max_output_tokens: req.config.max_tokens,
+    }),
+    ...(tools && { tools }),
+  })
+
+  if (res.error) {
+    throw new Error(res.error.message ?? 'Responses API returned an error')
+  }
+
+  return {
+    message: fromOpenAIResponse(res as OpenAIResponseLoose),
+    stop_reason: res.status ?? null,
+    usage: res.usage
+      ? {
+          input_tokens: res.usage.input_tokens,
+          output_tokens: res.usage.output_tokens,
+          cache_read_input_tokens:
+            res.usage.input_tokens_details?.cached_tokens ?? undefined,
+        }
+      : undefined,
+    latency_ms: Date.now() - start,
+  }
+}
+
 // ─── one-shot (non-stream) ──────────────────────────────────────────────────
 export async function runOnce(req: RunRequest): Promise<RunResponse> {
   const start = Date.now()
   const provider = resolveProvider(req)
 
   if (provider.api === 'anthropic-messages') {
-    const res = await anthropicClient(provider).messages.create({
+    const body = {
       model: req.config.model,
-      max_tokens: req.config.max_tokens ?? 4096,
-      ...(req.config.temperature !== undefined && {
-        temperature: req.config.temperature,
-      }),
+      ...toAnthropicRequestOptions(req.config),
       ...(req.system && { system: req.system }),
       ...(req.tools &&
         req.tools.length > 0 && {
-          tools: req.tools.map((t) => ({
-            name: t.name,
-            description: t.description,
-            input_schema: t.input_schema as Anthropic.Messages.Tool.InputSchema,
-          })),
+          tools: toAnthropicTools(
+            req.tools,
+          ) as Anthropic.Messages.Tool[],
         }),
-      ...(req.config.thinking && { thinking: req.config.thinking }),
-      messages: req.messages as Anthropic.Messages.MessageParam[],
-    })
+      messages: toAnthropicMessages(req.messages) as Anthropic.Messages.MessageParam[],
+    } as unknown as Anthropic.Messages.MessageCreateParamsNonStreaming
+    const res = await anthropicClient(provider).messages.create(body)
     return {
       message: fromAnthropicContent(
         res.content as unknown as Array<Record<string, unknown>>,
@@ -97,7 +184,12 @@ export async function runOnce(req: RunRequest): Promise<RunResponse> {
   }
 
   if (provider.api === 'openai-completions') {
-    const messages = toOpenAIMessages(req.system, req.messages)
+    const messages = toOpenAIMessages(req.system, req.messages, {
+      includeReasoningContent: shouldIncludeOpenAIReasoningContent(
+        req,
+        provider,
+      ),
+    })
     const tools =
       req.tools && req.tools.length > 0 ? toOpenAITools(req.tools) : undefined
     const res = await openaiClient(provider).chat.completions.create({
@@ -107,8 +199,9 @@ export async function runOnce(req: RunRequest): Promise<RunResponse> {
         temperature: req.config.temperature,
       }),
       ...tokenField(req.config.model, req.config.max_tokens),
+      ...openAIThinkingField(req, provider),
       ...(tools && { tools: tools as OpenAI.Chat.ChatCompletionTool[] }),
-    })
+    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming)
     const choice = res.choices[0]
     if (!choice) throw new Error('OpenAI returned no choices')
     return {
@@ -122,6 +215,10 @@ export async function runOnce(req: RunRequest): Promise<RunResponse> {
         : undefined,
       latency_ms: Date.now() - start,
     }
+  }
+
+  if (provider.api === 'openai-responses') {
+    return runOpenAIResponsesOnce(req, provider, start)
   }
 
   throw new Error(`unknown api protocol: ${provider.api}`)
@@ -140,6 +237,10 @@ export async function* runStream(req: RunRequest): AsyncGenerator<StreamEvent> {
     yield* runOpenAIStream(req, provider, start)
     return
   }
+  if (provider.api === 'openai-responses') {
+    yield* runOpenAIResponsesStream(req, provider, start)
+    return
+  }
   throw new Error(`unknown api protocol: ${provider.api}`)
 }
 
@@ -148,24 +249,17 @@ async function* runAnthropicStream(
   provider: ProviderRecord,
   start: number,
 ): AsyncGenerator<StreamEvent> {
-  const stream = anthropicClient(provider).messages.stream({
+  const body = {
     model: req.config.model,
-    max_tokens: req.config.max_tokens ?? 4096,
-    ...(req.config.temperature !== undefined && {
-      temperature: req.config.temperature,
-    }),
+    ...toAnthropicRequestOptions(req.config),
     ...(req.system && { system: req.system }),
     ...(req.tools &&
       req.tools.length > 0 && {
-        tools: req.tools.map((t) => ({
-          name: t.name,
-          description: t.description,
-          input_schema: t.input_schema as Anthropic.Messages.Tool.InputSchema,
-        })),
+        tools: toAnthropicTools(req.tools) as Anthropic.Messages.Tool[],
       }),
-    ...(req.config.thinking && { thinking: req.config.thinking }),
-    messages: req.messages as Anthropic.Messages.MessageParam[],
-  })
+    messages: toAnthropicMessages(req.messages) as Anthropic.Messages.MessageParam[],
+  } as unknown as Anthropic.Messages.MessageStreamParams
+  const stream = anthropicClient(provider).messages.stream(body)
 
   let stopReason: string | null = null
 
@@ -205,12 +299,19 @@ async function* runAnthropicStream(
         type: string
         text?: string
         thinking?: string
+        signature?: string
         partial_json?: string
       }
       if (d.type === 'text_delta' && d.text) {
         yield { type: 'text_delta', index: event.index, delta: d.text }
       } else if (d.type === 'thinking_delta' && d.thinking) {
         yield { type: 'thinking_delta', index: event.index, delta: d.thinking }
+      } else if (d.type === 'signature_delta' && d.signature) {
+        yield {
+          type: 'thinking_signature_delta',
+          index: event.index,
+          delta: d.signature,
+        }
       } else if (d.type === 'input_json_delta' && d.partial_json !== undefined) {
         yield {
           type: 'tool_input_delta',
@@ -245,7 +346,12 @@ async function* runOpenAIStream(
   provider: ProviderRecord,
   start: number,
 ): AsyncGenerator<StreamEvent> {
-  const messages = toOpenAIMessages(req.system, req.messages)
+  const messages = toOpenAIMessages(req.system, req.messages, {
+    includeReasoningContent: shouldIncludeOpenAIReasoningContent(
+      req,
+      provider,
+    ),
+  })
   const tools =
     req.tools && req.tools.length > 0 ? toOpenAITools(req.tools) : undefined
 
@@ -258,8 +364,9 @@ async function* runOpenAIStream(
       temperature: req.config.temperature,
     }),
     ...tokenField(req.config.model, req.config.max_tokens),
+    ...openAIThinkingField(req, provider),
     ...(tools && { tools: tools as OpenAI.Chat.ChatCompletionTool[] }),
-  })
+  } as OpenAI.Chat.ChatCompletionCreateParamsStreaming)
 
   // We synthesize block events from the chunk stream. Track which non-tool
   // block is currently open (text or thinking) — switching types closes the
@@ -386,5 +493,36 @@ async function* runOpenAIStream(
     stop_reason: finishReason,
     usage: finalUsage,
     latency_ms: Date.now() - start,
+  }
+}
+
+async function* runOpenAIResponsesStream(
+  req: RunRequest,
+  provider: ProviderRecord,
+  start: number,
+): AsyncGenerator<StreamEvent> {
+  const result = await runOpenAIResponsesOnce(req, provider, start)
+
+  for (const [index, block] of result.message.content.entries()) {
+    yield { type: 'block_start', index, block }
+    if (block.type === 'text') {
+      yield { type: 'text_delta', index, delta: block.text }
+    } else if (block.type === 'thinking') {
+      yield { type: 'thinking_delta', index, delta: block.thinking }
+    } else if (block.type === 'tool_use') {
+      yield {
+        type: 'tool_input_delta',
+        index,
+        delta: JSON.stringify(block.input),
+      }
+    }
+    yield { type: 'block_stop', index }
+  }
+
+  yield {
+    type: 'message_stop',
+    stop_reason: result.stop_reason,
+    usage: result.usage,
+    latency_ms: result.latency_ms,
   }
 }

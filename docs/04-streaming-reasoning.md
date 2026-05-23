@@ -6,8 +6,26 @@
 - `false`（默认）→ 等模型完整生成，返回一个 JSON
 - `true` → 返回 `application/x-ndjson` 流，前端逐行解析
 
-前端 `send()` 总是设 `stream:true`，所以你在 UI 看到的就是流式。
+前端 `send()` 总是走 `postRunStream`，Compare 也走同一条流式 replay 路径，
+所以你在主调试区和 Compare 里看到的都是流式。
 导出/导入 JSON 时 `stream` 字段保留但不影响行为。
+
+## 复制 cURL 的流式 / 非流式
+
+Model Input 面板提供两个明确入口：
+
+- `Copy Stream`：生成和主调试区一致的流式请求
+- `Copy Non-stream`：生成一次性响应请求，便于在终端直接看完整 JSON
+
+不同协议对应的 stream 字段略有差异：
+
+| Provider 协议 | `Copy Stream` | `Copy Non-stream` |
+|---|---|---|
+| `anthropic-messages` | 加 `stream: true` | 移除 `stream` |
+| `openai-completions` | 加 `stream: true` 和 `stream_options.include_usage` | 移除 `stream` / `stream_options` |
+| `openai-responses` | 加 `stream: true` | 移除 `stream` |
+
+具体 provider 代理是否完整支持两种模式，以 provider 实际返回为准。
 
 ## NDJSON 事件协议
 

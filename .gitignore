@@ -10,3 +10,4 @@ dist
 .omc/
 config/providers.json
 state/
+cases/
