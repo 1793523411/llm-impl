@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 
-const SERVER = process.env.SERVER ?? 'http://localhost:3099'
+const SERVER = process.env.SERVER ?? 'http://localhost:3181'
 const config = JSON.parse(
   readFileSync('./config/providers.json', 'utf8'),
 ) as {

@@ -9,9 +9,9 @@
   "scripts": {
     "dev": "concurrently -n server,web -c blue,magenta \"bun run dev:server\" \"bun run dev:web\"",
     "dev:server": "bun --hot apps/server/src/index.ts",
-    "dev:web": "bun --cwd apps/web run dev",
-    "build:web": "bun --cwd apps/web run build",
-    "typecheck": "tsc -b"
+    "dev:web": "bun run --cwd apps/web dev",
+    "build:web": "bun run --cwd apps/web build",
+    "typecheck": "tsc -p apps/server/tsconfig.json && tsc -p apps/web/tsconfig.json"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

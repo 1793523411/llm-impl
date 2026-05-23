@@ -7,5 +7,6 @@ dist
 .vite
 *.tsbuildinfo
 .claude/
+.omc/
 config/providers.json
 state/
