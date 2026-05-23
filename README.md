@@ -8,7 +8,7 @@
 NDJSON 流式输出，reasoning 思考块抽取，工具白名单真执行，
 多模型并排对比。
 
-![llm-impl 调试界面示意](docs/fig-debugger-flow.svg)
+![llm-impl 真实调试界面截图](docs/screenshot-debugger.png)
 
 ## 你可以用它做什么
 
@@ -28,7 +28,7 @@ Model Input 面板展示当前 provider/model 的 exact request body，并提供
 生成 cURL 时会由本地 server 读取 `config/providers.json` 里的真实 `apiKey`，
 并按目标协议生成 endpoint / headers / body：
 
-![Copy cURL 生成流程](docs/fig-curl-copy.svg)
+![Model Input cURL 复制截图](docs/screenshot-model-input-curl.png)
 
 ## 文档
 

@@ -2,7 +2,7 @@
 
 ## 三栏布局
 
-![核心调试界面示意](fig-debugger-flow.svg)
+![核心调试界面截图](screenshot-debugger.png)
 
 ```
 ┌─────────┬──────────────────────────────────┬──────────┐
@@ -33,6 +33,8 @@
 
 每个 block 都是一个普通受控表单——改它就是改它。没有"草稿"和"已发送"的区别。
 
+![消息回放与手工 tool_result 截图](screenshot-message-replay.png)
+
 ## Model Input 与 cURL
 
 左侧 `Model Input` 面板展示当前 provider/model 会收到的 request body。它不是 case JSON，
@@ -58,7 +60,7 @@ cURL 由本地 `/api/curl` 生成，会读取 `config/providers.json` 里的 pro
 - DeepSeek reasoning 模型遇到历史 `tool_use` 缺少 `reasoning_content` 时，自动加
   `thinking: { "type": "disabled" }`，保留 tool-call 历史但不伪造思考过程
 
-![Copy cURL 生成流程](fig-curl-copy.svg)
+![Model Input cURL 复制截图](screenshot-model-input-curl.png)
 
 ## 一次完整的调试循环
 
