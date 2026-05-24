@@ -10,6 +10,10 @@ import {
   RunRequest,
   SkillListRequest,
   SkillLoadRequest,
+  DebugRunRequest,
+  LiveDebugPauseRequest,
+  LiveDebugResumeRequest,
+  LiveDebugSettings,
 } from '@llm-impl/shared'
 import { runOnce, runStream } from './run'
 import {
@@ -26,6 +30,15 @@ import { execTool, listTools } from './exec-tool'
 import { callMcpTool, listMcpTools } from './mcp'
 import { listSkills, loadSkillContent } from './skills'
 import { buildRunnableCurl } from './curl'
+import { importDebugRun } from './debug-runs'
+import {
+  getLiveDebugState,
+  registerLiveDebugToolCall,
+  resumeLiveDebugPause,
+  syncLiveDebugCaseFromRun,
+  updateLiveDebugSettings,
+  waitForLiveDebugPause,
+} from './live-debug'
 
 const app = new Hono()
 
@@ -35,6 +48,74 @@ app.use('/api/*', cors())
 app.get('/api/health', (c) => c.json({ ok: true }))
 
 app.get('/api/providers', (c) => c.json(publicProviders()))
+
+app.post('/api/debug-runs', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const parsed = DebugRunRequest.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400)
+  }
+
+  try {
+    const status =
+      typeof parsed.data.metadata?.status === 'string'
+        ? parsed.data.metadata.status
+        : parsed.data.lastRun?.stop_reason
+    if (status === 'approval_pending') {
+      await syncLiveDebugCaseFromRun(parsed.data).catch(() => undefined)
+      return c.json({
+        ok: true,
+        id: parsed.data.source.runId ?? parsed.data.source.sessionId ?? 'debug-run',
+        casePath: '',
+        debugUrl: process.env.LLM_IMPL_WEB_URL ?? 'http://localhost:5181',
+        skipped: true,
+        reason: 'approval_pending',
+      })
+    }
+
+    const result = await importDebugRun(parsed.data)
+    await syncLiveDebugCaseFromRun(parsed.data).catch(() => undefined)
+    return c.json({ ok: true, ...result })
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500)
+  }
+})
+
+app.get('/api/live-debug/state', async (c) => c.json(await getLiveDebugState()))
+
+app.put('/api/live-debug/settings', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const parsed = LiveDebugSettings.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400)
+  }
+  return c.json({ settings: updateLiveDebugSettings(parsed.data) })
+})
+
+app.post('/api/live-debug/tool-calls', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const parsed = LiveDebugPauseRequest.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400)
+  }
+  return c.json(await registerLiveDebugToolCall(parsed.data))
+})
+
+app.post('/api/live-debug/pause-points/:pauseId/wait', async (c) => {
+  const pauseId = c.req.param('pauseId')
+  return c.json(await waitForLiveDebugPause(pauseId, c.req.raw.signal))
+})
+
+app.post('/api/live-debug/pause-points/:pauseId/resume', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const parsed = LiveDebugResumeRequest.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400)
+  }
+
+  const ok = await resumeLiveDebugPause(c.req.param('pauseId'))
+  return c.json({ ok, action: parsed.data.action })
+})
 
 app.post('/api/curl', async (c) => {
   const body = (await c.req.json().catch(() => null)) as

@@ -7,6 +7,10 @@ import type {
   StreamEvent,
   ExecToolDef,
   ExecToolResponse,
+  LiveDebugSettings,
+  LiveDebugStateResponse,
+  LiveDebugToolCallResponse,
+  LiveDebugWaitResponse,
   McpCallToolResponse,
   McpListToolsResponse,
   McpServerConfig,
@@ -242,4 +246,44 @@ export async function moveCaseEntry(from: string, to: string): Promise<void> {
 export async function deleteCase(path: string): Promise<void> {
   const res = await fetch(`/api/cases/${encodeURI(path)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`delete failed: ${res.status}`)
+}
+
+export async function getLiveDebugState(): Promise<LiveDebugStateResponse> {
+  const res = await fetch('/api/live-debug/state')
+  if (!res.ok) throw new Error(`live debug state failed: ${res.status}`)
+  return res.json()
+}
+
+export async function updateLiveDebugSettings(
+  settings: LiveDebugSettings,
+): Promise<LiveDebugSettings> {
+  const res = await fetch('/api/live-debug/settings', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(settings),
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data.error ?? `live debug settings failed: ${res.status}`)
+  }
+  return data.settings as LiveDebugSettings
+}
+
+export async function resumeLiveDebugPause(pauseId: string): Promise<void> {
+  const res = await fetch(`/api/live-debug/pause-points/${encodeURI(pauseId)}/resume`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'continue' }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok || data.ok === false) {
+    throw new Error(data.error ?? `live debug resume failed: ${res.status}`)
+  }
+}
+
+export type {
+  LiveDebugSettings,
+  LiveDebugStateResponse,
+  LiveDebugToolCallResponse,
+  LiveDebugWaitResponse,
 }

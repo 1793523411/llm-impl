@@ -18,6 +18,23 @@ const roleLabel = {
   assistant: { text: 'assistant', cls: 'text-purple-400' },
 } as const
 
+function isToolResultError(
+  block: Extract<UserContentBlock, { type: 'tool_result' }> | undefined,
+): boolean {
+  if (!block) return false
+  if (block.is_error) return true
+  try {
+    const parsed = JSON.parse(block.content)
+    return Boolean(
+      parsed?.error ||
+        parsed?.type === 'args_invalid' ||
+        parsed?.type === 'tool_execution_error',
+    )
+  } catch {
+    return /\b(error|args_invalid|tool_execution_error)\b/i.test(block.content)
+  }
+}
+
 export const MessageCard = memo(function MessageCard({
   message,
   index,
@@ -308,9 +325,12 @@ function ToolResultBlockEditor({
   const mcpServers = useStore((s) => s.mcpServers)
   const canRunTool = useStore((s) => s.canRunTool)
   const runRegisteredTool = useStore((s) => s.runRegisteredTool)
+  const currentCaseDebug = useStore((s) => s.currentCaseDebug)
   void execTools
   void skills
   void mcpServers
+  const isLiveCase =
+    currentCaseDebug?.metadata?.live === true || Boolean(currentCaseDebug?.live)
 
   // resolve the tool_use this is a result for (for the ▶ run button)
   let matchingToolName: string | undefined
@@ -326,6 +346,7 @@ function ToolResultBlockEditor({
   }
   const canRun =
     !!matchingToolName && canRunTool(matchingToolName)
+  const failed = isToolResultError(block)
 
   return (
     <BlockShell
@@ -338,9 +359,22 @@ function ToolResultBlockEditor({
         <div className="tool-call-summary">
           <span>matches</span>
           <code>{matchingToolName}</code>
+          <span
+            className={failed ? 'text-red-400' : 'text-emerald-400'}
+            title={failed ? 'Tool returned an error result' : 'Tool returned successfully'}
+          >
+            {failed ? 'failed' : 'ok'}
+          </span>
           {!canRun && (
-            <span className="tool-status" title="Manual/mock result">
-              mock
+            <span
+              className="tool-status"
+              title={
+                isLiveCase
+                  ? 'Result captured from the connected live agent'
+                  : 'Manual or mock result'
+              }
+            >
+              {isLiveCase ? 'live result' : 'mock'}
             </span>
           )}
         </div>
@@ -417,6 +451,8 @@ function ToolUseBlockEditor({
     JSON.stringify(block.input, null, 2),
   )
   const [inputError, setInputError] = useState<string | null>(null)
+  const [liveError, setLiveError] = useState<string | null>(null)
+  const [liveContinuing, setLiveContinuing] = useState(false)
   const [toolNameMode, setToolNameMode] = useState<'pick' | 'custom'>('pick')
   const lastSyncedBlockIdRef = useRef(block.id)
   const lastSyncedInputRef = useRef(JSON.stringify(block.input, null, 2))
@@ -424,9 +460,13 @@ function ToolUseBlockEditor({
   const skills = useStore((s) => s.skills)
   const mcpServers = useStore((s) => s.mcpServers)
   const messages = useStore((s) => s.messages)
+  const currentCaseDebug = useStore((s) => s.currentCaseDebug)
   const getEffectiveTools = useStore((s) => s.getEffectiveTools)
   const addMockToolResultAfter = useStore((s) => s.addMockToolResultAfter)
+  const resumeLivePause = useStore((s) => s.resumeLivePause)
   const effectiveTools = getEffectiveTools()
+  const isLiveCase =
+    currentCaseDebug?.metadata?.live === true || Boolean(currentCaseDebug?.live)
   const isConfiguredTool = effectiveTools.some((tool) => tool.name === block.name)
   const toolNameOptions = effectiveTools.some((tool) => tool.name === block.name)
     ? effectiveTools
@@ -434,7 +474,9 @@ function ToolUseBlockEditor({
       ? [
           {
             name: block.name,
-            description: 'custom/mock tool name',
+            description: isLiveCase
+              ? 'external/live captured tool name'
+              : 'custom/mock tool name',
             input_schema: {},
           },
           ...effectiveTools,
@@ -442,16 +484,47 @@ function ToolUseBlockEditor({
       : effectiveTools
   const toolNameListId = `tool-name-options-${block.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`
   const nextMessage = messages[msgIdx + 1]
-  const hasMockResult =
+  const hasToolResult =
     nextMessage?.role === 'user' &&
     nextMessage.content.some(
       (item) => item.type === 'tool_result' && item.tool_use_id === block.id,
     )
+  const matchingResult =
+    nextMessage?.role === 'user'
+      ? nextMessage.content.find(
+          (item): item is Extract<UserContentBlock, { type: 'tool_result' }> =>
+            item.type === 'tool_result' && item.tool_use_id === block.id,
+        )
+      : undefined
+  const matchingResultFailed = isToolResultError(matchingResult)
+  const liveForBlock =
+    currentCaseDebug?.live?.toolCallId === block.id
+      ? currentCaseDebug.live
+      : undefined
+  const livePlanProgress =
+    typeof liveForBlock?.plan?.progress === 'string'
+      ? liveForBlock.plan.progress
+      : undefined
+  const canContinueLive =
+    liveForBlock?.status === 'paused' && typeof liveForBlock.pauseId === 'string'
   void tools
   void skills
   void mcpServers
 
   const serializedInput = JSON.stringify(block.input, null, 2)
+
+  const continueLive = async () => {
+    if (!canContinueLive || !liveForBlock?.pauseId) return
+    setLiveContinuing(true)
+    try {
+      await resumeLivePause(liveForBlock.pauseId)
+      setLiveError(null)
+    } catch (err) {
+      setLiveError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLiveContinuing(false)
+    }
+  }
 
   useEffect(() => {
     const isNewBlock = lastSyncedBlockIdRef.current !== block.id
@@ -477,18 +550,38 @@ function ToolUseBlockEditor({
       accent="text-emerald-400"
       onRemove={onRemove}
       actions={
-        <button
-          className="btn-ghost text-[10px] text-zinc-500 hover:text-zinc-300"
-          disabled={!block.id || hasMockResult}
-          onClick={() => addMockToolResultAfter(msgIdx, blockIdx)}
-          title={
-            hasMockResult
-              ? 'A matching tool_result already exists in the next user message'
-              : 'Insert a matching tool_result in the next user message'
-          }
-        >
-          {hasMockResult ? 'mock result exists' : '+ mock result'}
-        </button>
+        <>
+          {canContinueLive && (
+            <button
+              className="btn-primary text-[10px]"
+              disabled={liveContinuing}
+              onClick={continueLive}
+              title="Continue the paused connected agent session"
+            >
+              {liveContinuing ? 'Continuing...' : 'Continue live'}
+            </button>
+          )}
+          <button
+            className="btn-ghost text-[10px] text-zinc-500 hover:text-zinc-300"
+            disabled={!block.id || hasToolResult}
+            onClick={() => addMockToolResultAfter(msgIdx, blockIdx)}
+            title={
+              hasToolResult
+                ? isLiveCase
+                  ? 'A matching live tool_result already exists in the next user message'
+                  : 'A matching mock tool_result already exists in the next user message'
+                : 'Insert a matching tool_result in the next user message'
+            }
+          >
+            {hasToolResult
+              ? isLiveCase
+                ? 'live result exists'
+                : 'mock result exists'
+              : isLiveCase
+                ? '+ tool_result'
+                : '+ mock result'}
+          </button>
+        </>
       }
     >
       <div className="space-y-1">
@@ -511,7 +604,9 @@ function ToolUseBlockEditor({
                 <input
                   className="field text-xs"
                   list={toolNameListId}
-                  placeholder="custom/mock tool name"
+                  placeholder={
+                    isLiveCase ? 'external/live tool name' : 'custom/mock tool name'
+                  }
                   value={block.name}
                   onChange={(e) => onChange({ name: e.target.value })}
                 />
@@ -538,12 +633,54 @@ function ToolUseBlockEditor({
             </button>
           </div>
           {block.name && !isConfiguredTool && (
-            <span className="tool-status" title="Manual/mock tool name">
-              mock
+            <span
+              className="tool-status"
+              title={
+                isLiveCase
+                  ? 'Tool captured from a connected live agent'
+                  : 'Manual or mock tool name'
+              }
+            >
+              {isLiveCase ? 'external' : 'mock'}
+            </span>
+          )}
+          {matchingResult && (
+            <span
+              className={matchingResultFailed ? 'text-red-400' : 'text-emerald-400'}
+              title={
+                matchingResultFailed
+                  ? 'Matching tool_result is an error'
+                  : 'Matching tool_result is available'
+              }
+            >
+              {matchingResultFailed ? 'failed' : 'ok'}
+            </span>
+          )}
+          {liveForBlock?.status && (
+            <span
+              className={
+                liveForBlock.status === 'paused'
+                  ? 'text-amber-400'
+                  : liveForBlock.status === 'continued'
+                    ? 'text-emerald-400'
+                    : 'text-red-400'
+              }
+              title="Live breakpoint status"
+            >
+              live {liveForBlock.status}
             </span>
           )}
         </div>
       </div>
+      {livePlanProgress && (
+        <details className="mt-1">
+          <summary className="cursor-pointer text-[10px] uppercase tracking-wider text-zinc-500">
+            live plan progress
+          </summary>
+          <pre className="tool-schema-preview scrollbar">{livePlanProgress}</pre>
+        </details>
+      )}
+      {liveError && <div className="mt-1 text-xs text-red-400">{liveError}</div>}
       <div className="mt-1">
         <label className="tool-call-id-field">
           <span>call id</span>

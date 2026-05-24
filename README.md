@@ -45,6 +45,7 @@ Model Input 面板展示当前 provider/model 的 exact request body，并提供
 | 06 | [用例与持久化](docs/06-cases-and-state.md) | Cases 文件树，workspace 自动保存，Copy/Import JSON |
 | 07 | [多模型对比](docs/07-compare.md) | Compare modal 用法，并排 diff |
 | 08 | [架构与扩展](docs/08-architecture.md) | 目录结构、协议适配器、扩展工具/provider/协议 |
+| 09 | [Debug SDK](docs/09-debug-sdk.md) | 外部 agent run 导入为可重放 case |
 
 ## 启动一句话
 

@@ -13,6 +13,7 @@ html, body, #root { height: 100%; }
   --app-active: rgb(63 63 70);
   --app-border: rgb(39 39 42);
   --app-border-strong: rgb(63 63 70);
+  --app-shadow: 0 18px 46px rgb(0 0 0 / 0.22);
   --app-text: rgb(244 244 245);
   --app-text-quiet: rgb(212 212 216);
   --app-muted: rgb(161 161 170);
@@ -27,6 +28,9 @@ html, body, #root { height: 100%; }
   --app-red: rgb(248 113 113);
   --app-emerald: rgb(52 211 153);
   --app-amber: rgb(251 191 36);
+  --app-amber-muted: rgb(252 211 77);
+  --app-amber-bg: rgb(120 53 15 / 0.2);
+  --app-amber-border: rgb(245 158 11 / 0.55);
   --app-blue: rgb(96 165 250);
   --app-blue-bg: rgb(23 37 84 / 0.2);
   --app-blue-border: rgb(30 58 138);
@@ -46,6 +50,7 @@ html.light {
   --app-active: rgb(224 232 243);
   --app-border: rgb(214 221 231);
   --app-border-strong: rgb(183 194 209);
+  --app-shadow: 0 14px 34px rgb(15 23 42 / 0.08);
   --app-text: rgb(24 32 48);
   --app-text-quiet: rgb(51 65 85);
   --app-muted: rgb(71 85 105);
@@ -59,7 +64,10 @@ html.light {
   --app-danger-border: rgb(185 28 28);
   --app-red: rgb(220 38 38);
   --app-emerald: rgb(4 120 87);
-  --app-amber: rgb(180 83 9);
+  --app-amber: rgb(146 64 14);
+  --app-amber-muted: rgb(180 83 9);
+  --app-amber-bg: rgb(255 247 237);
+  --app-amber-border: rgb(217 119 6 / 0.42);
   --app-blue: rgb(29 78 216);
   --app-blue-bg: rgb(239 246 255 / 0.95);
   --app-blue-border: rgb(147 197 253);
@@ -259,6 +267,21 @@ textarea, input, select {
   display: flex;
   flex-direction: column;
   background: var(--app-bg);
+}
+
+.live-pause-banner {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--app-amber-border);
+  border-radius: 6px;
+  background: var(--app-amber-bg);
+  padding: 10px 12px;
+  box-shadow: var(--app-shadow);
 }
 
 /* ─── cases tree ────────────────────────────────────────────────── */
@@ -1083,10 +1106,16 @@ html.light .hover\:text-emerald-400:hover {
   color: var(--app-emerald);
 }
 
+html.light .text-amber-200\/80 {
+  color: var(--app-amber-muted);
+}
+
+html.light .text-amber-300,
 html.light .text-amber-400 {
   color: var(--app-amber);
 }
 
+html.light .text-red-300,
 html.light .text-red-400,
 html.light .hover\:text-red-400:hover {
   color: var(--app-red);
