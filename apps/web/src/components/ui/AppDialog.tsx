@@ -28,16 +28,28 @@ export function AppDialog({
   onClose: () => void
 }) {
   const panelRef = useRef<HTMLDivElement>(null)
+  const onCloseRef = useRef(onClose)
 
   useEffect(() => {
-    if (!open) return
+    onCloseRef.current = onClose
+  }, [onClose])
+
+  useEffect(() => {
+    if (!open) return undefined
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
+      if (event.key === 'Escape') onCloseRef.current()
     }
     window.addEventListener('keydown', onKeyDown)
-    requestAnimationFrame(() => panelRef.current?.focus())
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, onClose])
+    const frame = requestAnimationFrame(() => {
+      const panel = panelRef.current
+      if (!panel || panel.contains(document.activeElement)) return
+      panel.focus()
+    })
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open])
 
   if (!open) return null
 
