@@ -43,6 +43,29 @@ export type DebugRunUsage = {
   cache_read_input_tokens?: number
 }
 
+export type DebugConstraintSnapshot = {
+  kind?: 'plan' | 'policy' | 'approval' | 'budget' | 'guardrail' | 'custom'
+  name?: string
+  status?: 'ok' | 'blocked' | 'violated' | 'waiting' | 'completed'
+  currentStep?: string
+  progressText?: string
+  allowedTools?: string[]
+  requiredTools?: string[]
+  forbiddenTools?: string[]
+  violation?: {
+    message: string
+    retryable?: boolean
+  }
+  raw?: unknown
+  [key: string]: unknown
+}
+
+export type DebugCaseRouting = {
+  group?: string | string[]
+  name?: string
+  [key: string]: unknown
+}
+
 export type DebugRunPayload = {
   source: {
     project: string
@@ -50,6 +73,7 @@ export type DebugRunPayload = {
     runId?: string
     userId?: string
   }
+  caseRouting?: DebugCaseRouting
   config: {
     provider?: string
     model: string
@@ -62,6 +86,7 @@ export type DebugRunPayload = {
   tools?: DebugRunTool[]
   messages?: DebugRunMessage[]
   events?: DebugRunEvent[]
+  constraints?: DebugConstraintSnapshot[]
   metadata?: Record<string, unknown>
   lastRun?: {
     timestamp?: string
@@ -86,6 +111,29 @@ export type DebugRunSubmitResult = {
   reason?: string
 }
 
+export type LiveDebugToolCall = {
+  id: string
+  name: string
+  input?: Record<string, unknown>
+}
+
+export type LiveDebugToolCallResponse = {
+  paused: boolean
+  action?: 'continue'
+  pauseId?: string
+  casePath?: string
+}
+
+export type LiveDebugResumeAction =
+  | { action: 'continue' }
+  | { action: 'override_input'; input: Record<string, unknown> }
+  | { action: 'mock_result'; result: unknown; isError?: boolean }
+  | { action: 'abort'; reason?: string }
+
+export type LiveDebugWaitResponse = LiveDebugResumeAction & {
+  status: 'continued' | 'timeout' | 'abandoned' | 'aborted'
+}
+
 export type LlmImplDebuggerOptions = {
   endpoint?: string
   project: string
@@ -94,7 +142,10 @@ export type LlmImplDebuggerOptions = {
   model?: string
   api?: DebugRunPayload['config']['api']
   baseUrl?: string
+  caseRouting?: DebugCaseRouting
   redact?: string[]
+  timeoutMs?: number
+  liveWaitTimeoutMs?: number
   onError?: (error: Error) => void
 }
 
@@ -104,6 +155,8 @@ type RequestOptions = {
 }
 
 const DEFAULT_ENDPOINT = 'http://localhost:3181'
+const DEFAULT_TIMEOUT_MS = 2500
+const DEFAULT_LIVE_WAIT_TIMEOUT_MS = 30 * 60 * 1000
 const DEFAULT_REDACT_KEYS = [
   'apikey',
   'api_key',
@@ -136,7 +189,7 @@ function redactValue(value: unknown, redactKeys: string[]): unknown {
   return out
 }
 
-function postJson<T>(url: string, payload: unknown): Promise<T> {
+function postJson<T>(url: string, payload: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
   const target = new URL(url)
   const body = JSON.stringify(payload)
   const transport = target.protocol === 'https:' ? https : http
@@ -168,7 +221,15 @@ function postJson<T>(url: string, payload: unknown): Promise<T> {
       })
     })
 
-    req.on('error', reject)
+    const timer = setTimeout(() => {
+      req.destroy(new Error(`llm-impl debug request timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
+
+    req.on('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    req.on('close', () => clearTimeout(timer))
     req.write(body)
     req.end()
   })
@@ -181,6 +242,9 @@ export class LlmImplDebugger {
   private readonly redactKeys: string[]
   private readonly onError?: (error: Error) => void
   private readonly defaults: Partial<DebugRunPayload['config']>
+  private readonly caseRouting?: DebugCaseRouting
+  private readonly timeoutMs: number
+  private readonly liveWaitTimeoutMs: number
   private events: DebugRunEvent[] = []
   private messages: DebugRunMessage[] = []
   private tools: DebugRunTool[] = []
@@ -194,6 +258,9 @@ export class LlmImplDebugger {
     this.enabled = options.enabled ?? true
     this.redactKeys = [...DEFAULT_REDACT_KEYS, ...(options.redact ?? [])]
     this.onError = options.onError
+    this.caseRouting = options.caseRouting
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    this.liveWaitTimeoutMs = options.liveWaitTimeoutMs ?? DEFAULT_LIVE_WAIT_TIMEOUT_MS
     this.defaults = {
       provider: options.provider,
       model: options.model,
@@ -274,6 +341,8 @@ export class LlmImplDebugger {
     messages?: DebugRunMessage[]
     tools?: DebugRunTool[]
     events?: DebugRunEvent[]
+    constraints?: DebugConstraintSnapshot[]
+    caseRouting?: DebugCaseRouting
     metadata?: Record<string, unknown>
     lastRun?: DebugRunPayload['lastRun']
   }): Promise<DebugRunSubmitResult | null> {
@@ -292,6 +361,7 @@ export class LlmImplDebugger {
         runId: this.runId,
         userId: this.userId,
       },
+      caseRouting: input.caseRouting ?? this.caseRouting,
       config: {
         ...this.defaults,
         ...input.config,
@@ -301,6 +371,7 @@ export class LlmImplDebugger {
       messages: input.messages ?? this.messages,
       tools: input.tools ?? this.tools,
       events: input.events ?? this.events,
+      constraints: input.constraints,
       metadata: input.metadata,
       lastRun: input.lastRun,
     }
@@ -310,10 +381,91 @@ export class LlmImplDebugger {
       return await postJson<DebugRunSubmitResult>(
         `${this.endpoint}/api/debug-runs`,
         redacted,
+        this.timeoutMs,
       )
     } catch (error) {
       this.handleError(error instanceof Error ? error : new Error(String(error)))
       return null
+    }
+  }
+
+  async beforeToolCall(input: {
+    toolCall: LiveDebugToolCall
+    messages?: DebugRunMessage[]
+    tools?: DebugRunTool[]
+    events?: DebugRunEvent[]
+    constraints?: DebugConstraintSnapshot[]
+    caseRouting?: DebugCaseRouting
+    config?: Partial<DebugRunPayload['config']>
+  }): Promise<LiveDebugToolCallResponse> {
+    if (!this.enabled) return { paused: false, action: 'continue' }
+
+    const payload = {
+      source: {
+        project: this.project,
+        sessionId: this.sessionId,
+        runId: this.runId,
+        userId: this.userId,
+      },
+      caseRouting: input.caseRouting ?? this.caseRouting,
+      config:
+        input.config || this.defaults.model
+          ? {
+              ...this.defaults,
+              ...input.config,
+            }
+          : undefined,
+      toolCall: input.toolCall,
+      messages: input.messages ?? this.messages,
+      tools: input.tools ?? this.tools,
+      events: input.events ?? this.events,
+      constraints: input.constraints,
+    }
+
+    try {
+      const redacted = redactValue(payload, this.redactKeys)
+      return await postJson<LiveDebugToolCallResponse>(
+        `${this.endpoint}/api/live-debug/tool-calls`,
+        redacted,
+        this.timeoutMs,
+      )
+    } catch (error) {
+      this.handleError(error instanceof Error ? error : new Error(String(error)))
+      return { paused: false, action: 'continue' }
+    }
+  }
+
+  async waitForToolResume(pauseId: string): Promise<LiveDebugWaitResponse> {
+    if (!this.enabled) return { action: 'continue', status: 'abandoned' }
+
+    try {
+      return await postJson<LiveDebugWaitResponse>(
+        `${this.endpoint}/api/live-debug/pause-points/${encodeURIComponent(pauseId)}/wait`,
+        {},
+        this.liveWaitTimeoutMs + 5000,
+      )
+    } catch (error) {
+      this.handleError(error instanceof Error ? error : new Error(String(error)))
+      return { action: 'continue', status: 'abandoned' }
+    }
+  }
+
+  async resumeToolCall(
+    pauseId: string,
+    resume: LiveDebugResumeAction = { action: 'continue' },
+  ): Promise<boolean> {
+    if (!this.enabled) return false
+
+    try {
+      const result = await postJson<{ ok: boolean }>(
+        `${this.endpoint}/api/live-debug/pause-points/${encodeURIComponent(pauseId)}/resume`,
+        resume,
+        this.timeoutMs,
+      )
+      return result.ok
+    } catch (error) {
+      this.handleError(error instanceof Error ? error : new Error(String(error)))
+      return false
     }
   }
 

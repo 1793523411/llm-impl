@@ -79,6 +79,20 @@ function slug(value: string | undefined, fallback: string): string {
   return cleaned || fallback
 }
 
+function routeGroupSegments(route: DebugRunRequest['caseRouting']): string[] {
+  const rawGroup = route?.group
+  const values = Array.isArray(rawGroup) ? rawGroup : rawGroup ? [rawGroup] : []
+  return values
+    .flatMap((value) => value.split(/[\\/]+/))
+    .map((value) => slug(value, ''))
+    .filter(Boolean)
+}
+
+function routeName(route: DebugRunRequest['caseRouting']): string | undefined {
+  if (!route?.name) return undefined
+  return slug(route.name, '') || undefined
+}
+
 function timestampForPath(date = new Date()): string {
   const pad = (value: number) => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}-${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`
@@ -430,9 +444,15 @@ function casePathForDebugRun(input: DebugRunRequest, id: string): string {
   const session = slug(input.source.sessionId, 'session')
   const run = slug(input.source.runId ?? id, 'run')
   const runTail = run.startsWith(`${session}-`) ? run.slice(session.length + 1) : run
-  const suffix = runTail && runTail !== session ? `-${runTail.slice(-8)}` : ''
+  const routedName = routeName(input.caseRouting)
+  const name = routedName ?? session
+  const suffix = routedName
+    ? ''
+    : runTail && runTail !== session
+      ? `-${runTail.slice(-8)}`
+      : ''
   const timestamp = timestampForPath()
-  return `debug/${project}/${timestamp}-${session}${suffix}.json`
+  return ['debug', project, ...routeGroupSegments(input.caseRouting), `${timestamp}-${name}${suffix}.json`].join('/')
 }
 
 export function buildDebugRunCase(
@@ -472,6 +492,7 @@ export function buildDebugRunCase(
     debug: {
       source: input.source,
       events: input.events,
+      ...(input.constraints?.length && { constraints: input.constraints }),
       ...(Object.keys(metadata).length > 0 && { metadata }),
       ...(options.debugLive && { live: options.debugLive }),
     },

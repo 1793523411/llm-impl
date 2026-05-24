@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import type {
   AssistantContentBlock,
+  DebugConstraintSnapshot,
   Message,
   UserContentBlock,
 } from '@llm-impl/shared'
@@ -33,6 +34,45 @@ function isToolResultError(
   } catch {
     return /\b(error|args_invalid|tool_execution_error)\b/i.test(block.content)
   }
+}
+
+function constraintsFromLive(
+  constraints: DebugConstraintSnapshot[] | undefined,
+  plan: Record<string, unknown> | undefined,
+): DebugConstraintSnapshot[] {
+  if (constraints?.length) return constraints
+  if (!plan) return []
+  return [
+    {
+      kind: 'plan',
+      status: 'ok',
+      currentStep: typeof plan.currentStep === 'string' ? plan.currentStep : undefined,
+      progressText: typeof plan.progress === 'string' ? plan.progress : undefined,
+      raw: plan,
+    },
+  ]
+}
+
+function constraintsText(
+  constraints: DebugConstraintSnapshot[] | undefined,
+  plan: Record<string, unknown> | undefined,
+): string {
+  const items = constraintsFromLive(constraints, plan)
+  if (items.length === 0) return ''
+  return items
+    .map((item) => {
+      const lines = [
+        `[${item.kind}] ${item.name ?? ''} ${item.status ?? ''}`.trim(),
+        item.currentStep ? `currentStep: ${item.currentStep}` : '',
+        item.allowedTools?.length ? `allowedTools: ${item.allowedTools.join(', ')}` : '',
+        item.requiredTools?.length ? `requiredTools: ${item.requiredTools.join(', ')}` : '',
+        item.forbiddenTools?.length ? `forbiddenTools: ${item.forbiddenTools.join(', ')}` : '',
+        item.violation?.message ? `violation: ${item.violation.message}` : '',
+        item.progressText ?? '',
+      ].filter(Boolean)
+      return lines.join('\n')
+    })
+    .join('\n\n')
 }
 
 export const MessageCard = memo(function MessageCard({
@@ -453,6 +493,8 @@ function ToolUseBlockEditor({
   const [inputError, setInputError] = useState<string | null>(null)
   const [liveError, setLiveError] = useState<string | null>(null)
   const [liveContinuing, setLiveContinuing] = useState(false)
+  const [liveMockText, setLiveMockText] = useState('{"status":"ok"}')
+  const [liveMockIsError, setLiveMockIsError] = useState(false)
   const [toolNameMode, setToolNameMode] = useState<'pick' | 'custom'>('pick')
   const lastSyncedBlockIdRef = useRef(block.id)
   const lastSyncedInputRef = useRef(JSON.stringify(block.input, null, 2))
@@ -501,10 +543,10 @@ function ToolUseBlockEditor({
     currentCaseDebug?.live?.toolCallId === block.id
       ? currentCaseDebug.live
       : undefined
-  const livePlanProgress =
-    typeof liveForBlock?.plan?.progress === 'string'
-      ? liveForBlock.plan.progress
-      : undefined
+  const liveConstraintsText = constraintsText(
+    liveForBlock?.constraints,
+    liveForBlock?.plan,
+  )
   const canContinueLive =
     liveForBlock?.status === 'paused' && typeof liveForBlock.pauseId === 'string'
   void tools
@@ -513,11 +555,17 @@ function ToolUseBlockEditor({
 
   const serializedInput = JSON.stringify(block.input, null, 2)
 
-  const continueLive = async () => {
+  const resumeLive = async (
+    resume:
+      | { action: 'continue' }
+      | { action: 'override_input'; input: Record<string, unknown> }
+      | { action: 'mock_result'; result: unknown; isError?: boolean }
+      | { action: 'abort'; reason?: string },
+  ) => {
     if (!canContinueLive || !liveForBlock?.pauseId) return
     setLiveContinuing(true)
     try {
-      await resumeLivePause(liveForBlock.pauseId)
+      await resumeLivePause(liveForBlock.pauseId, resume)
       setLiveError(null)
     } catch (err) {
       setLiveError(err instanceof Error ? err.message : String(err))
@@ -525,6 +573,41 @@ function ToolUseBlockEditor({
       setLiveContinuing(false)
     }
   }
+
+  const continueLive = () => resumeLive({ action: 'continue' })
+
+  const overrideLiveInput = () => {
+    try {
+      const parsed = JSON.parse(inputText || '{}') as Record<string, unknown>
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Tool input must be a JSON object')
+      }
+      setInputError(null)
+      void resumeLive({ action: 'override_input', input: parsed })
+    } catch (err) {
+      setInputError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const mockLiveResult = () => {
+    let result: unknown = liveMockText
+    try {
+      result = JSON.parse(liveMockText)
+    } catch {
+      result = liveMockText
+    }
+    void resumeLive({
+      action: 'mock_result',
+      result,
+      ...(liveMockIsError ? { isError: true } : {}),
+    })
+  }
+
+  const abortLive = () =>
+    resumeLive({
+      action: 'abort',
+      reason: `Aborted from llm-impl before ${block.name || 'tool call'}`,
+    })
 
   useEffect(() => {
     const isNewBlock = lastSyncedBlockIdRef.current !== block.id
@@ -672,12 +755,12 @@ function ToolUseBlockEditor({
           )}
         </div>
       </div>
-      {livePlanProgress && (
+      {liveConstraintsText && (
         <details className="mt-1">
           <summary className="cursor-pointer text-[10px] uppercase tracking-wider text-zinc-500">
-            live plan progress
+            constraints at pause
           </summary>
-          <pre className="tool-schema-preview scrollbar">{livePlanProgress}</pre>
+          <pre className="tool-schema-preview scrollbar">{liveConstraintsText}</pre>
         </details>
       )}
       {liveError && <div className="mt-1 text-xs text-red-400">{liveError}</div>}
@@ -716,6 +799,64 @@ function ToolUseBlockEditor({
           </div>
         )}
       </div>
+      {canContinueLive && (
+        <div className="mt-2 rounded border border-amber-900/60 bg-amber-950/20 p-2">
+          <div className="mb-1 text-[10px] uppercase tracking-wider text-amber-300">
+            live resume controls
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className="btn-primary text-[10px]"
+              disabled={liveContinuing}
+              onClick={continueLive}
+            >
+              Continue
+            </button>
+            <button
+              className="btn text-[10px]"
+              disabled={liveContinuing || Boolean(inputError)}
+              onClick={overrideLiveInput}
+              title="Resume the connected agent with the currently edited input JSON"
+            >
+              Override input
+            </button>
+            <button
+              className="btn-danger text-[10px]"
+              disabled={liveContinuing}
+              onClick={abortLive}
+            >
+              Abort
+            </button>
+          </div>
+          <div className="mt-2">
+            <div className="label mb-0.5">mock result</div>
+            <textarea
+              className="field-area font-mono text-xs"
+              rows={3}
+              value={liveMockText}
+              onChange={(event) => setLiveMockText(event.target.value)}
+            />
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <label className="flex items-center gap-2 text-[10px] text-zinc-400">
+                <input
+                  type="checkbox"
+                  checked={liveMockIsError}
+                  onChange={(event) => setLiveMockIsError(event.target.checked)}
+                />
+                is_error
+              </label>
+              <button
+                className="btn text-[10px]"
+                disabled={liveContinuing}
+                onClick={mockLiveResult}
+                title="Skip real tool execution and inject this result into the connected agent"
+              >
+                Resume with mock
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </BlockShell>
   )
 }

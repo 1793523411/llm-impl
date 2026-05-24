@@ -113,7 +113,7 @@ app.post('/api/live-debug/pause-points/:pauseId/resume', async (c) => {
     return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400)
   }
 
-  const ok = await resumeLiveDebugPause(c.req.param('pauseId'))
+  const ok = await resumeLiveDebugPause(c.req.param('pauseId'), parsed.data)
   return c.json({ ok, action: parsed.data.action })
 })
 
@@ -358,8 +358,12 @@ app.put('/api/cases/*', async (c) => {
 app.delete('/api/cases/*', async (c) => {
   const path = c.req.path.replace(/^\/api\/cases\//, '')
   if (!path) return c.json({ error: 'missing path' }, 400)
-  const ok = await deleteCase(path)
-  return c.json({ ok })
+  try {
+    const ok = await deleteCase(path)
+    return c.json({ ok })
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400)
+  }
 })
 
 const port = Number(process.env.PORT ?? 3181)

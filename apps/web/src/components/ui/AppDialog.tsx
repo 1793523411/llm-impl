@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 
 type DialogAction = {
   label: string
@@ -10,6 +10,13 @@ function actionClass(variant: DialogAction['variant']): string {
   if (variant === 'primary') return 'btn-primary'
   if (variant === 'danger') return 'btn-danger'
   return 'btn'
+}
+
+function isImeComposing(
+  event: KeyboardEvent | ReactKeyboardEvent<HTMLInputElement>,
+): boolean {
+  const nativeEvent = 'nativeEvent' in event ? event.nativeEvent : event
+  return nativeEvent.isComposing || nativeEvent.keyCode === 229
 }
 
 export function AppDialog({
@@ -37,6 +44,7 @@ export function AppDialog({
   useEffect(() => {
     if (!open) return undefined
     const onKeyDown = (event: KeyboardEvent) => {
+      if (isImeComposing(event)) return
       if (event.key === 'Escape') onCloseRef.current()
     }
     window.addEventListener('keydown', onKeyDown)
@@ -207,7 +215,9 @@ export function PromptDialog({
         placeholder={placeholder}
         onChange={(event) => onValueChange(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === 'Enter') onConfirm()
+          if (event.key !== 'Enter' || isImeComposing(event)) return
+          event.preventDefault()
+          onConfirm()
         }}
       />
       {error && <div className="app-dialog-error">{error}</div>}

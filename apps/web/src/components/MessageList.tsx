@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { AssistantContentBlock } from '@llm-impl/shared'
+import type { AssistantContentBlock, DebugConstraintSnapshot } from '@llm-impl/shared'
 import { useStore } from '../store'
 import { MessageCard } from './MessageCard'
 
@@ -19,6 +19,36 @@ function findToolName(
   return undefined
 }
 
+function constraintsText(
+  constraints: DebugConstraintSnapshot[] | undefined,
+  plan: Record<string, unknown> | undefined,
+): string {
+  const items = constraints?.length
+    ? constraints
+    : plan
+      ? [
+          {
+            kind: 'plan' as const,
+            status: 'ok' as const,
+            currentStep: typeof plan.currentStep === 'string' ? plan.currentStep : undefined,
+            progressText: typeof plan.progress === 'string' ? plan.progress : undefined,
+            raw: plan,
+          },
+        ]
+      : []
+  return items
+    .map((item) =>
+      [
+        `[${item.kind}] ${item.name ?? ''} ${item.status ?? ''}`.trim(),
+        item.currentStep ? `currentStep: ${item.currentStep}` : '',
+        item.progressText ?? '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    )
+    .join('\n\n')
+}
+
 function LivePauseBanner() {
   const messages = useStore((s) => s.messages)
   const live = useStore((s) => s.currentCaseDebug?.live)
@@ -29,6 +59,7 @@ function LivePauseBanner() {
   if (live?.status !== 'paused' || !live.pauseId) return null
 
   const toolName = live.toolName ?? findToolName(messages, live.toolCallId) ?? 'tool call'
+  const liveConstraintsText = constraintsText(live.constraints, live.plan)
   const continueLive = async () => {
     setContinuing(true)
     try {
@@ -47,12 +78,12 @@ function LivePauseBanner() {
         <div className="text-xs font-medium text-amber-300">
           paused before <code>{toolName}</code>
         </div>
-        {typeof live.plan?.progress === 'string' && (
+        {liveConstraintsText && (
           <details className="mt-1">
             <summary className="cursor-pointer text-[10px] uppercase tracking-wider text-amber-200/80">
-              plan progress
+              constraints at pause
             </summary>
-            <pre className="tool-schema-preview scrollbar">{live.plan.progress}</pre>
+            <pre className="tool-schema-preview scrollbar">{liveConstraintsText}</pre>
           </details>
         )}
         {error && <div className="mt-1 text-xs text-red-300">{error}</div>}

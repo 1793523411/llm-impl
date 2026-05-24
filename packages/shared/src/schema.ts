@@ -345,6 +345,59 @@ export const McpCallToolResponse = ExecToolResponse.extend({
 })
 export type McpCallToolResponse = z.infer<typeof McpCallToolResponse>
 
+export const DebugConstraintSnapshot = z
+  .object({
+    kind: z
+      .enum(['plan', 'policy', 'approval', 'budget', 'guardrail', 'custom'])
+      .default('custom'),
+    name: z.string().optional(),
+    status: z
+      .enum(['ok', 'blocked', 'violated', 'waiting', 'completed'])
+      .default('ok'),
+    currentStep: z.string().optional(),
+    progressText: z.string().optional(),
+    allowedTools: z.array(z.string()).optional(),
+    requiredTools: z.array(z.string()).optional(),
+    forbiddenTools: z.array(z.string()).optional(),
+    violation: z
+      .object({
+        message: z.string(),
+        retryable: z.boolean().optional(),
+      })
+      .optional(),
+    raw: z.unknown().optional(),
+  })
+  .passthrough()
+export type DebugConstraintSnapshot = z.infer<typeof DebugConstraintSnapshot>
+
+export const LiveDebugResumeAction = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('continue'),
+  }),
+  z.object({
+    action: z.literal('override_input'),
+    input: z.record(z.unknown()),
+  }),
+  z.object({
+    action: z.literal('mock_result'),
+    result: z.unknown(),
+    isError: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal('abort'),
+    reason: z.string().optional(),
+  }),
+])
+export type LiveDebugResumeAction = z.infer<typeof LiveDebugResumeAction>
+
+export const DebugCaseRouting = z
+  .object({
+    group: z.union([z.string(), z.array(z.string())]).optional(),
+    name: z.string().optional(),
+  })
+  .passthrough()
+export type DebugCaseRouting = z.infer<typeof DebugCaseRouting>
+
 export const Case = z.object({
   meta: z
     .object({
@@ -376,15 +429,18 @@ export const Case = z.object({
     .object({
       source: z.record(z.unknown()).optional(),
       events: z.array(z.unknown()).optional(),
+      constraints: z.array(DebugConstraintSnapshot).optional(),
       metadata: z.record(z.unknown()).optional(),
       live: z
         .object({
-          status: z.enum(['paused', 'continued', 'timeout', 'abandoned']).optional(),
+          status: z.enum(['paused', 'continued', 'timeout', 'abandoned', 'aborted']).optional(),
           pauseId: z.string().optional(),
           casePath: z.string().optional(),
           toolCallId: z.string().optional(),
           toolName: z.string().optional(),
           plan: z.record(z.unknown()).optional(),
+          constraints: z.array(DebugConstraintSnapshot).optional(),
+          resume: LiveDebugResumeAction.optional(),
         })
         .optional(),
     })
@@ -420,11 +476,13 @@ export type DebugRunLastRun = z.infer<typeof DebugRunLastRun>
 
 export const DebugRunRequest = z.object({
   source: DebugRunSource,
+  caseRouting: DebugCaseRouting.optional(),
   config: DebugRunConfig,
   system: z.string().optional(),
   tools: z.array(z.unknown()).default([]),
   messages: z.array(z.unknown()).default([]),
   events: z.array(z.unknown()).default([]),
+  constraints: z.array(DebugConstraintSnapshot).optional(),
   metadata: z.record(z.unknown()).optional(),
   lastRun: DebugRunLastRun.optional(),
 })
@@ -456,11 +514,13 @@ export type LiveDebugToolCall = z.infer<typeof LiveDebugToolCall>
 
 export const LiveDebugPauseRequest = z.object({
   source: DebugRunSource,
+  caseRouting: DebugCaseRouting.optional(),
   config: DebugRunConfig.optional(),
   toolCall: LiveDebugToolCall,
   messages: z.array(z.unknown()).default([]),
   tools: z.array(z.unknown()).default([]),
   events: z.array(z.unknown()).default([]),
+  constraints: z.array(DebugConstraintSnapshot).optional(),
   plan: z
     .object({
       progress: z.string().optional(),
@@ -470,14 +530,18 @@ export const LiveDebugPauseRequest = z.object({
 })
 export type LiveDebugPauseRequest = z.infer<typeof LiveDebugPauseRequest>
 
-export const LiveDebugResumeRequest = z.object({
-  action: z.literal('continue').default('continue'),
-})
+export const LiveDebugResumeRequest = z.preprocess((value) => {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>
+    if (!record.action) return { ...record, action: 'continue' }
+  }
+  return value
+}, LiveDebugResumeAction)
 export type LiveDebugResumeRequest = z.infer<typeof LiveDebugResumeRequest>
 
 export const LiveDebugPausePoint = z.object({
   id: z.string(),
-  status: z.enum(['paused', 'continued', 'timeout', 'abandoned']),
+  status: z.enum(['paused', 'continued', 'timeout', 'abandoned', 'aborted']),
   source: DebugRunSource,
   toolCall: LiveDebugToolCall,
   casePath: z.string().optional(),
@@ -489,6 +553,8 @@ export const LiveDebugPausePoint = z.object({
       currentStep: z.string().optional(),
     })
     .optional(),
+  constraints: z.array(DebugConstraintSnapshot).optional(),
+  resume: LiveDebugResumeAction.optional(),
   messagesCount: z.number(),
   toolsCount: z.number(),
   eventsCount: z.number(),
@@ -510,7 +576,11 @@ export const LiveDebugToolCallResponse = z.object({
 export type LiveDebugToolCallResponse = z.infer<typeof LiveDebugToolCallResponse>
 
 export const LiveDebugWaitResponse = z.object({
-  action: z.literal('continue'),
-  status: z.enum(['continued', 'timeout', 'abandoned']),
+  action: z.enum(['continue', 'override_input', 'mock_result', 'abort']),
+  status: z.enum(['continued', 'timeout', 'abandoned', 'aborted']),
+  input: z.record(z.unknown()).optional(),
+  result: z.unknown().optional(),
+  isError: z.boolean().optional(),
+  reason: z.string().optional(),
 })
 export type LiveDebugWaitResponse = z.infer<typeof LiveDebugWaitResponse>

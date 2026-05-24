@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type {
+  DebugConstraintSnapshot,
   DebugRunRequest,
   LiveDebugPausePoint,
   LiveDebugPauseRequest,
+  LiveDebugResumeAction,
   LiveDebugSettings,
   LiveDebugStateResponse,
   LiveDebugToolCallResponse,
@@ -13,6 +15,7 @@ import { buildDebugRunCase } from './debug-runs'
 
 type StoredPausePoint = LiveDebugPausePoint & {
   config?: LiveDebugPauseRequest['config']
+  caseRouting?: LiveDebugPauseRequest['caseRouting']
   lastRun?: DebugRunRequest['lastRun']
   metadata?: Record<string, unknown>
   messages: unknown[]
@@ -53,6 +56,20 @@ function slug(value: string | undefined, fallback: string): string {
   return cleaned || fallback
 }
 
+function routeGroupSegments(route: LiveDebugPauseRequest['caseRouting']): string[] {
+  const rawGroup = route?.group
+  const values = Array.isArray(rawGroup) ? rawGroup : rawGroup ? [rawGroup] : []
+  return values
+    .flatMap((value) => value.split(/[\\/]+/))
+    .map((value) => slug(value, ''))
+    .filter(Boolean)
+}
+
+function routeName(route: LiveDebugPauseRequest['caseRouting']): string | undefined {
+  if (!route?.name) return undefined
+  return slug(route.name, '') || undefined
+}
+
 function normalizeSettings(input: LiveDebugSettings): LiveDebugSettings {
   const toolNames = Array.from(
     new Set(input.toolNames.map((name) => name.trim()).filter(Boolean)),
@@ -74,6 +91,8 @@ function visiblePausePoint(point: StoredPausePoint): LiveDebugPausePoint {
     createdAt: point.createdAt,
     resumedAt: point.resumedAt,
     plan: point.plan,
+    constraints: point.constraints,
+    resume: point.resume,
     messagesCount: point.messagesCount,
     toolsCount: point.toolsCount,
     eventsCount: point.eventsCount,
@@ -86,10 +105,11 @@ function shouldPause(toolName: string): boolean {
   return settings.toolNames.some((name) => name === '*' || name === toolName)
 }
 
-function liveCasePath(input: Pick<LiveDebugPauseRequest, 'source'>): string {
+function liveCasePath(input: Pick<LiveDebugPauseRequest, 'source' | 'caseRouting'>): string {
   const project = slug(input.source.project, 'live')
   const session = slug(input.source.sessionId ?? input.source.runId, 'session')
-  return `live/${project}/${session}.json`
+  const name = routeName(input.caseRouting) ?? session
+  return ['live', project, ...routeGroupSegments(input.caseRouting), `${name}.json`].join('/')
 }
 
 function defaultLiveConfig(point: StoredPausePoint): DebugRunRequest['config'] {
@@ -101,15 +121,62 @@ function defaultLiveConfig(point: StoredPausePoint): DebugRunRequest['config'] {
   )
 }
 
+function constraintsFromInput(
+  input: Pick<LiveDebugPauseRequest, 'constraints' | 'plan'>,
+): DebugConstraintSnapshot[] | undefined {
+  if (input.constraints?.length) return input.constraints
+  if (!input.plan) return undefined
+  return [
+    {
+      kind: 'plan',
+      status: 'ok',
+      currentStep: input.plan.currentStep,
+      progressText: input.plan.progress,
+      raw: input.plan,
+    },
+  ]
+}
+
+function waitResponseFromResumeAction(
+  resume: LiveDebugResumeAction,
+): LiveDebugWaitResponse {
+  return {
+    ...resume,
+    status: resume.action === 'abort' ? 'aborted' : 'continued',
+  }
+}
+
+function resumeActionFromWaitResponse(
+  response: LiveDebugWaitResponse,
+): LiveDebugResumeAction | undefined {
+  if (response.action === 'continue') return { action: 'continue' }
+  if (response.action === 'override_input' && response.input) {
+    return { action: 'override_input', input: response.input }
+  }
+  if (response.action === 'mock_result') {
+    return {
+      action: 'mock_result',
+      result: response.result,
+      isError: response.isError,
+    }
+  }
+  if (response.action === 'abort') {
+    return { action: 'abort', reason: response.reason }
+  }
+  return undefined
+}
+
 async function writeLiveCase(point: StoredPausePoint): Promise<void> {
   if (!point.casePath) return
 
   const input: DebugRunRequest = {
     source: point.source,
+    caseRouting: point.caseRouting,
     config: defaultLiveConfig(point),
     messages: point.messages,
     tools: point.tools,
     events: point.events,
+    constraints: point.constraints,
     metadata: {
       ...(point.metadata ?? {}),
       live: true,
@@ -117,6 +184,8 @@ async function writeLiveCase(point: StoredPausePoint): Promise<void> {
       status: point.status,
       toolCall: point.toolCall,
       plan: point.plan,
+      constraints: point.constraints,
+      resume: point.resume,
     },
     lastRun: point.lastRun,
   }
@@ -133,6 +202,8 @@ async function writeLiveCase(point: StoredPausePoint): Promise<void> {
       toolCallId: point.toolCall.id,
       toolName: point.toolCall.name,
       plan: point.plan,
+      constraints: point.constraints,
+      resume: point.resume,
     },
   })
   await writeCase(point.casePath, caseData)
@@ -140,14 +211,15 @@ async function writeLiveCase(point: StoredPausePoint): Promise<void> {
 
 async function settlePause(
   pauseId: string,
-  status: LiveDebugWaitResponse['status'],
+  response: LiveDebugWaitResponse,
 ): Promise<boolean> {
   const point = pausePoints.get(pauseId)
   if (!point) return false
 
   if (point.status === 'paused') {
-    point.status = status
+    point.status = response.status
     point.resumedAt = nowIso()
+    point.resume = resumeActionFromWaitResponse(response)
   }
 
   await writeLiveCase(point).catch(() => undefined)
@@ -157,7 +229,7 @@ async function settlePause(
     clearTimeout(waiter.timer)
     if (waiter.cleanup) waiter.cleanup()
     waiters.delete(pauseId)
-    waiter.resolve({ action: 'continue', status })
+    waiter.resolve(response)
   }
 
   return true
@@ -231,11 +303,13 @@ export async function registerLiveDebugToolCall(
     id: pauseId,
     status: 'paused',
     source: input.source,
+    caseRouting: input.caseRouting,
     config: input.config,
     toolCall: input.toolCall,
     casePath,
     createdAt: nowIso(),
     plan: input.plan,
+    constraints: constraintsFromInput(input),
     messages: input.messages,
     tools: input.tools,
     events: input.events,
@@ -258,11 +332,13 @@ export async function syncLiveDebugCaseFromRun(input: DebugRunRequest): Promise<
   if (!point || point.status === 'paused') return
 
   point.config = input.config
+  point.caseRouting = input.caseRouting
   point.lastRun = input.lastRun
   point.metadata = input.metadata
   point.messages = input.messages
   point.tools = input.tools
   point.events = input.events
+  point.constraints = input.constraints ?? point.constraints
   point.messagesCount = input.messages.length
   point.toolsCount = input.tools.length
   point.eventsCount = input.events.length
@@ -277,12 +353,13 @@ export function waitForLiveDebugPause(
   const point = pausePoints.get(pauseId)
   if (!point) return Promise.resolve({ action: 'continue', status: 'abandoned' })
   if (point.status !== 'paused') {
+    if (point.resume) return Promise.resolve(waitResponseFromResumeAction(point.resume))
     return Promise.resolve({ action: 'continue', status: point.status })
   }
 
   return new Promise((resolve) => {
     const finish = (status: LiveDebugWaitResponse['status']) => {
-      void settlePause(pauseId, status)
+      void settlePause(pauseId, { action: 'continue', status })
     }
 
     const timer = setTimeout(() => {
@@ -309,6 +386,9 @@ export function waitForLiveDebugPause(
   })
 }
 
-export function resumeLiveDebugPause(pauseId: string): Promise<boolean> {
-  return settlePause(pauseId, 'continued')
+export function resumeLiveDebugPause(
+  pauseId: string,
+  resume: LiveDebugResumeAction,
+): Promise<boolean> {
+  return settlePause(pauseId, waitResponseFromResumeAction(resume))
 }

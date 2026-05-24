@@ -11,6 +11,7 @@ import type {
   LiveDebugStateResponse,
   LiveDebugToolCallResponse,
   LiveDebugWaitResponse,
+  LiveDebugResumeAction,
   McpCallToolResponse,
   McpListToolsResponse,
   McpServerConfig,
@@ -245,7 +246,9 @@ export async function moveCaseEntry(from: string, to: string): Promise<void> {
 
 export async function deleteCase(path: string): Promise<void> {
   const res = await fetch(`/api/cases/${encodeURI(path)}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`delete failed: ${res.status}`)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error ?? `delete failed: ${res.status}`)
+  if (data.ok === false) throw new Error('source not found')
 }
 
 export async function getLiveDebugState(): Promise<LiveDebugStateResponse> {
@@ -269,11 +272,14 @@ export async function updateLiveDebugSettings(
   return data.settings as LiveDebugSettings
 }
 
-export async function resumeLiveDebugPause(pauseId: string): Promise<void> {
+export async function resumeLiveDebugPause(
+  pauseId: string,
+  resume: LiveDebugResumeAction = { action: 'continue' },
+): Promise<void> {
   const res = await fetch(`/api/live-debug/pause-points/${encodeURI(pauseId)}/resume`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ action: 'continue' }),
+    body: JSON.stringify(resume),
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok || data.ok === false) {
@@ -286,4 +292,5 @@ export type {
   LiveDebugStateResponse,
   LiveDebugToolCallResponse,
   LiveDebugWaitResponse,
+  LiveDebugResumeAction,
 }

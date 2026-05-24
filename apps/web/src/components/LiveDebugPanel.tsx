@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type {
+  DebugConstraintSnapshot,
   LiveDebugPausePoint,
   LiveDebugSettings,
   LiveDebugStateResponse,
@@ -28,6 +29,37 @@ function statusClass(status: LiveDebugPausePoint['status']): string {
   return 'text-red-400'
 }
 
+function constraintsText(
+  constraints: DebugConstraintSnapshot[] | undefined,
+  plan: Record<string, unknown> | undefined,
+): string {
+  const items = constraints?.length
+    ? constraints
+    : plan
+      ? [
+          {
+            kind: 'plan' as const,
+            status: 'ok' as const,
+            currentStep: typeof plan.currentStep === 'string' ? plan.currentStep : undefined,
+            progressText: typeof plan.progress === 'string' ? plan.progress : undefined,
+            raw: plan,
+          },
+        ]
+      : []
+  return items
+    .map((item) =>
+      [
+        `[${item.kind}] ${item.name ?? ''} ${item.status ?? ''}`.trim(),
+        item.currentStep ? `currentStep: ${item.currentStep}` : '',
+        item.violation?.message ? `violation: ${item.violation.message}` : '',
+        item.progressText ?? '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    )
+    .join('\n\n')
+}
+
 function PausePointCard({
   point,
   onOpenCase,
@@ -36,6 +68,7 @@ function PausePointCard({
   onOpenCase: (casePath: string) => Promise<void>
 }) {
   const [opening, setOpening] = useState(false)
+  const pointConstraintsText = constraintsText(point.constraints, point.plan)
 
   const openCase = async () => {
     if (!point.casePath) return
@@ -80,12 +113,12 @@ function PausePointCard({
         </div>
       )}
 
-      {point.plan?.progress && (
+      {pointConstraintsText && (
         <details className="mt-2">
           <summary className="cursor-pointer text-[10px] uppercase tracking-wider text-zinc-500">
-            plan progress
+            constraints at pause
           </summary>
-          <pre className="tool-schema-preview scrollbar">{point.plan.progress}</pre>
+          <pre className="tool-schema-preview scrollbar">{pointConstraintsText}</pre>
         </details>
       )}
 
@@ -111,6 +144,10 @@ export function LiveDebugPanel() {
 
   const pausedCount = useMemo(
     () => state.pausePoints.filter((point) => point.status === 'paused').length,
+    [state.pausePoints],
+  )
+  const pausedPausePoints = useMemo(
+    () => state.pausePoints.filter((point) => point.status === 'paused'),
     [state.pausePoints],
   )
 
@@ -214,10 +251,10 @@ export function LiveDebugPanel() {
       {error && <div className="text-xs text-red-400">{error}</div>}
 
       <div className="space-y-2">
-        {state.pausePoints.length === 0 ? (
-          <div className="setup-empty-state">No live pause points yet</div>
+        {pausedPausePoints.length === 0 ? (
+          <div className="setup-empty-state">No paused live breakpoints</div>
         ) : (
-          state.pausePoints.map((point) => (
+          pausedPausePoints.map((point) => (
             <PausePointCard key={point.id} point={point} onOpenCase={openCase} />
           ))
         )}

@@ -15,6 +15,7 @@ import type {
   Tool,
   UserContentBlock,
   Usage,
+  LiveDebugResumeAction,
 } from '@llm-impl/shared'
 import * as api from './api'
 import type { CaseEntry } from './api'
@@ -121,7 +122,7 @@ interface Store {
   getEffectiveTools: () => Tool[]
   getEffectiveSystem: () => string
   canRunTool: (name: string) => boolean
-  resumeLivePause: (pauseId: string) => Promise<void>
+  resumeLivePause: (pauseId: string, resume?: LiveDebugResumeAction) => Promise<void>
   refreshCases: () => Promise<void>
   loadCase: (path: string) => Promise<void>
   saveCase: (path: string) => Promise<void>
@@ -217,6 +218,13 @@ const normalizeRelPath = (value: string): string =>
 
 const joinRelPath = (...parts: string[]): string =>
   normalizeRelPath(parts.filter(Boolean).join('/'))
+
+const caseEntryExists = (entries: CaseEntry[], targetPath: string): boolean =>
+  entries.some(
+    (entry) =>
+      entry.path === targetPath ||
+      (entry.children ? caseEntryExists(entry.children, targetPath) : false),
+  )
 
 const newCaseFileName = (): string => {
   const d = new Date()
@@ -812,6 +820,9 @@ export const useStore = create<Store>()(
 
       newCase: async (dir, name) => {
         const path = newCasePath(dir, name)
+        if (caseEntryExists(get().cases, path)) {
+          throw new Error(`case already exists: ${path}`)
+        }
         const data = freshCase(path)
         await api.writeCase(path, data)
         rememberSavedCase(path, data)
@@ -1088,8 +1099,8 @@ export const useStore = create<Store>()(
         )
       },
 
-      resumeLivePause: async (pauseId) => {
-        await api.resumeLiveDebugPause(pauseId)
+      resumeLivePause: async (pauseId, resume = { action: 'continue' }) => {
+        await api.resumeLiveDebugPause(pauseId, resume)
         const path = get().currentCasePath
         if (path) {
           await get().loadCase(path)
@@ -1168,8 +1179,13 @@ export const useStore = create<Store>()(
       },
 
       deleteCase: async (path) => {
-        await api.deleteCase(path)
-        if (get().currentCasePath === path) {
+        const normalizedPath = normalizeRelPath(path)
+        await api.deleteCase(normalizedPath)
+        const currentCasePath = get().currentCasePath
+        if (
+          currentCasePath === normalizedPath ||
+          currentCasePath?.startsWith(`${normalizedPath}/`)
+        ) {
           lastSavedCaseFingerprint = null
           set({
             currentCasePath: null,
