@@ -433,6 +433,8 @@ function configFromDebugRun(input: DebugRunRequest): Config {
       process.env.LLM_IMPL_DEBUG_PROVIDER ??
       input.source.project,
     model: input.config.model,
+    api: input.config.api,
+    baseUrl: input.config.baseUrl,
     temperature: input.config.temperature,
     max_tokens: input.config.max_tokens,
     stream: true,

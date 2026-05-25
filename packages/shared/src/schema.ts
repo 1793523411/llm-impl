@@ -193,6 +193,8 @@ export type ProviderTestResponse = z.infer<typeof ProviderTestResponse>
 export const Config = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
+  api: ApiProtocol.optional(),
+  baseUrl: z.string().optional(),
   temperature: z.number().min(0).max(2).optional(),
   max_tokens: z.number().int().positive().optional(),
   stream: z.boolean().default(false),

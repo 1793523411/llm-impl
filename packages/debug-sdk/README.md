@@ -11,6 +11,11 @@ It can:
   guardrail, or custom state
 - fail open when the debugger server is unavailable
 
+If your project uses LangChain or LangGraph, start with
+`@llm-impl/langchain-adapter` instead of calling this low-level SDK directly.
+The adapter provides callback collection, tool wrappers, and LangGraph examples
+on top of this package.
+
 ## Install for Local Development
 
 ```bash
@@ -155,6 +160,11 @@ Defaults:
 `redact` extends the built-in sensitive-key list. Built-ins include token,
 secret, password, cookie, authorization, and api key variants.
 
+`provider`, `model`, `api`, and `baseUrl` are sent into the debug case. They do
+not need to exist in llm-impl's local `config/providers.json` for display: the
+web UI preserves them as external case metadata. Running the case from llm-impl
+still requires a configured provider key, since requests need a local API key.
+
 ## Lifecycle API
 
 These methods record local events. They do not send network requests by
@@ -162,7 +172,7 @@ themselves:
 
 ```ts
 debug.runStart({ sessionId, runId, userId, metadata })
-debug.modelStart({ model, provider, baseUrl, messages, tools })
+debug.modelStart({ model, provider, api, baseUrl, messages, tools })
 debug.modelDelta(chunk)
 debug.assistantMessage({ content, toolCalls })
 debug.toolStart({ toolCallId, toolName, args })
@@ -317,3 +327,12 @@ The SDK is designed not to break the agent:
 
 Use `onError` for logging. Do not rely on debugger availability for production
 agent correctness.
+
+## Framework Adapters
+
+- `@llm-impl/langchain-adapter`: official TypeScript adapter for LangChain and
+  LangGraph.
+- Examples live in `examples/`.
+  - `06-debug-sdk-direct-submit`: direct SDK completed-run import.
+  - `07-debug-sdk-live-resume-actions`: direct SDK live pause/resume actions.
+  - `08-debug-sdk-fail-open-redaction`: fail-open and redaction behavior.

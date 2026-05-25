@@ -171,7 +171,8 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
 
-function shouldRedact(key: string, redactKeys: string[]): boolean {
+function shouldRedact(key: string, value: unknown, redactKeys: string[]): boolean {
+  if (typeof value === 'number') return false
   const normalized = key.toLowerCase()
   return redactKeys.some((item) => normalized.includes(item.toLowerCase()))
 }
@@ -182,7 +183,7 @@ function redactValue(value: unknown, redactKeys: string[]): unknown {
 
   const out: Record<string, unknown> = {}
   for (const [key, child] of Object.entries(value)) {
-    out[key] = shouldRedact(key, redactKeys)
+    out[key] = shouldRedact(key, child, redactKeys)
       ? '[redacted]'
       : redactValue(child, redactKeys)
   }
@@ -280,6 +281,7 @@ export class LlmImplDebugger {
   modelStart(input: {
     model?: string
     provider?: string
+    api?: DebugRunPayload['config']['api']
     baseUrl?: string
     messages: DebugRunMessage[]
     tools?: DebugRunTool[]
@@ -290,6 +292,7 @@ export class LlmImplDebugger {
     Object.assign(this.defaults, {
       model: input.model ?? this.defaults.model,
       provider: input.provider ?? this.defaults.provider,
+      api: input.api ?? this.defaults.api,
       baseUrl: input.baseUrl ?? this.defaults.baseUrl,
     })
     this.record('model_start', {

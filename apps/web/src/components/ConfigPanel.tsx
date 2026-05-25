@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { ProviderTestResponse } from '@llm-impl/shared'
+import type { ModelInfo, ProviderInfo, ProviderTestResponse } from '@llm-impl/shared'
 import * as api from '../api'
 import { useStore } from '../store'
 import { Select } from './ui/Select'
@@ -22,9 +22,47 @@ export function ModelConfigForm() {
 
   const currentProvider = providers.find((p) => p.key === config.provider)
   const currentModel = currentProvider?.models.find((m) => m.id === config.model)
+  const externalModel: ModelInfo | null =
+    config.model && !currentModel
+      ? {
+          id: config.model,
+          name: `${config.model} (from case)`,
+          api: config.api,
+        }
+      : null
+  const providerForDisplay: ProviderInfo | null =
+    currentProvider ??
+    (config.provider
+      ? {
+          key: config.provider,
+          api: config.api ?? 'openai-responses',
+          baseUrl: config.baseUrl ?? 'external debug case',
+          models: externalModel ? [externalModel] : [],
+        }
+      : null)
+  const modelForDisplay = currentModel ?? externalModel
+  const providerOptions = currentProvider
+    ? providers
+    : [
+        ...providers,
+        ...(providerForDisplay
+          ? [
+              {
+                ...providerForDisplay,
+                key: config.provider,
+              },
+            ]
+          : []),
+      ]
+  const modelOptions = [
+    ...(externalModel ? [externalModel] : []),
+    ...(currentProvider?.models ?? []),
+  ]
+  const isExternalProvider = Boolean(config.provider && !currentProvider)
+  const canTest = Boolean(currentProvider && config.model && !testing)
 
   const handleTest = async () => {
-    if (!config.provider || !config.model) return
+    if (!currentProvider || !config.provider || !config.model) return
     setTesting(true)
     setTestResult(null)
     try {
@@ -38,31 +76,48 @@ export function ModelConfigForm() {
 
   return (
     <div className="model-config-form space-y-4">
-        <div>
-          <div className="label mb-1">provider</div>
-          <Select
-            value={config.provider}
-            onChange={(newKey) => {
-              const newProvider = providers.find((p) => p.key === newKey)
-              const firstModelId = newProvider?.models[0]?.id ?? ''
-              setTestResult(null)
-              setConfig({ provider: newKey, model: firstModelId })
-            }}
-            placeholder={providers.length === 0 ? '(loading…)' : '(select provider)'}
-            options={providers.map((p) => ({
-              value: p.key,
-              label: `${p.key} · ${protocolLabel(p.api)}`,
-              searchText: `${p.key} ${p.api} ${p.baseUrl}`,
-            }))}
-          />
-          {currentProvider && (
-            <div className="text-[10px] text-zinc-600 mt-1 truncate">
-              {currentProvider.baseUrl}
-            </div>
-          )}
-        </div>
+      <div>
+        <div className="label mb-1">provider</div>
+        <Select
+          value={config.provider}
+          onChange={(newKey) => {
+            const newProvider = providers.find((p) => p.key === newKey)
+            const firstModelId = newProvider?.models[0]?.id ?? ''
+            setTestResult(null)
+            setConfig({
+              provider: newKey,
+              model: firstModelId,
+              api: undefined,
+              baseUrl: undefined,
+            })
+          }}
+          placeholder={providers.length === 0 ? '(loading…)' : '(select provider)'}
+          options={providerOptions.map((p) => ({
+            value: p.key,
+            label: `${p.key} · ${protocolLabel(p.api)}${
+              currentProvider || p.key !== config.provider ? '' : ' · from case'
+            }`,
+            searchText: `${p.key} ${p.api} ${p.baseUrl}`,
+          }))}
+        />
+        {providerForDisplay && (
+          <div className="text-[10px] text-zinc-600 mt-1 truncate">
+            {currentProvider
+              ? currentProvider.baseUrl
+              : `${providerForDisplay.baseUrl} · not in providers.json`}
+          </div>
+        )}
+        {isExternalProvider && (
+          <div className="mt-2 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-300">
+            This provider/model came from the imported case and is view-only here.
+            Add <span className="font-mono">{config.provider}</span> to{' '}
+            <span className="font-mono">config/providers.json</span> to Send,
+            Compare, or Test it from llm-impl.
+          </div>
+        )}
+      </div>
 
-        <div>
+      <div>
           <div className="label mb-1">model</div>
           <div className="flex gap-1">
             <Select
@@ -73,7 +128,7 @@ export function ModelConfigForm() {
                 setTestResult(null)
               }}
               placeholder={currentProvider ? '(select model)' : '(select provider)'}
-              options={(currentProvider?.models ?? []).map((m) => ({
+              options={modelOptions.map((m) => ({
                 value: m.id,
                 label: `${m.name ?? m.id}${m.reasoning ? ' 🧠' : ''}${
                   m.input?.includes('image') ? ' 🖼' : ''
@@ -83,20 +138,25 @@ export function ModelConfigForm() {
             />
             <button
               className="btn"
-              disabled={!currentProvider || !currentModel || testing}
+              disabled={!canTest}
               onClick={handleTest}
-              title="Run a minimal request against this model"
+              title={
+                currentProvider
+                  ? 'Run a minimal request against this provider/model'
+                  : 'Add this provider to providers.json before running it from llm-impl'
+              }
             >
               {testing ? 'Testing…' : 'Test'}
             </button>
           </div>
-          {currentModel && (
+          {modelForDisplay && (
             <div className="text-[10px] text-zinc-600 mt-1 space-x-2">
-              {currentModel.contextWindow && (
-                <span>ctx {(currentModel.contextWindow / 1000).toFixed(0)}k</span>
+              {modelForDisplay.contextWindow && (
+                <span>ctx {(modelForDisplay.contextWindow / 1000).toFixed(0)}k</span>
               )}
-              {currentModel.maxTokens && <span>max {currentModel.maxTokens}</span>}
-              <span className="font-mono">{currentModel.id}</span>
+              {modelForDisplay.maxTokens && <span>max {modelForDisplay.maxTokens}</span>}
+              <span className="font-mono">{modelForDisplay.id}</span>
+              {!currentModel && <span>external model from case</span>}
             </div>
           )}
           {testResult && (
@@ -140,7 +200,7 @@ export function ModelConfigForm() {
           />
         </div>
 
-        {currentProvider?.api === 'anthropic-messages' && (
+        {providerForDisplay?.api === 'anthropic-messages' && (
           <div className="space-y-2">
             <label className="flex items-center gap-2 text-sm">
               <input

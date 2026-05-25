@@ -46,6 +46,14 @@ Model Input 面板展示当前 provider/model 的 exact request body，并提供
 | 07 | [多模型对比](docs/07-compare.md) | Compare modal 用法，并排 diff |
 | 08 | [架构与扩展](docs/08-architecture.md) | 目录结构、协议适配器、扩展工具/provider/协议 |
 | 09 | [Debug SDK](docs/09-debug-sdk.md) | 外部 agent run 导入、Live Debug 断点、constraints 协议 |
+| 10 | [LangChain / LangGraph Adapter](docs/10-langchain-langgraph-adapter.md) | 官方 adapter、工具包装、回调采集、LangGraph interrupt 模式 |
+
+外部框架接入示例见 [examples](examples/README.md)，其中包含 LangChain
+callback trace、LangChain live tools、LangGraph ToolNode 和 LangGraph
+interrupt/resume 四种模式。
+
+AI 助手可使用项目内 [skills](skills/README.md) 读取 SDK 接入说明；skill
+通过引用同一份 `docs/` 和 package README 保持同步。
 
 ## 启动一句话
 

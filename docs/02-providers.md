@@ -139,6 +139,16 @@ curl http://localhost:3181/api/providers/test \
 
 server 会发起一个最小文本请求，并返回 `ok`、延迟、token 用量和一小段输出样例。
 
+## 外部 Debug Case 的模型展示
+
+通过 Debug SDK / live debug 导入的 case 会保留业务侧上报的
+`provider`、`model`、`api`、`baseUrl`。如果这个 provider 或 model 还没有写进本机
+`config/providers.json`，前端仍会在 Model 面板展示它，并标记为 `from case`，避免调试
+轨迹里使用的真实模型丢失。
+
+这只是展示和审计能力。要在 llm-impl 里重新发送、Compare 或点击 `Test`，仍然需要把该
+provider 配到 `providers.json`，因为请求必须使用本机保存的 `apiKey`。
+
 ## 为什么不用 .env
 
 `.env` 适合 1–2 个 key，但当你接 9 个 provider、22 个模型，每家有自己的 baseUrl 和别名，

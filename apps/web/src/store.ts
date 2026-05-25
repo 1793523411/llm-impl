@@ -933,9 +933,14 @@ export const useStore = create<Store>()(
         try {
           const providers = await api.listProviders()
           set({ providers })
-          // if current provider/model no longer valid, fall back to first
-          const { config } = get()
+          // Preserve external provider/model values captured by debug cases.
+          // Drafts still fall back to the first configured provider/model.
+          const { config, currentCaseDebug, currentCaseMeta } = get()
+          const isDebugCase = Boolean(currentCaseDebug?.source || currentCaseMeta?.source)
           const cur = providers.find((p) => p.key === config.provider)
+          if (isDebugCase && (!cur || !cur.models.some((m) => m.id === config.model))) {
+            return
+          }
           if (!cur && providers[0]) {
             const first = providers[0]
             set({

@@ -114,6 +114,7 @@ debug.runStart({ sessionId, runId, userId, metadata: { taskType: 'batch' } })
 debug.modelStart({
   model,
   provider: 'ark',
+  api: 'openai-responses',
   baseUrl,
   messages,
   tools,
@@ -365,6 +366,12 @@ PUT  /api/live-debug/settings
 }
 ```
 
+`config.provider/model/api/baseUrl` are preserved on imported debug cases even
+when the model is not present in local `config/providers.json`. The web UI shows
+that provider/model as `from case` so the captured run remains readable. Replay
+and `Test` still require a matching provider key in `providers.json`, because
+llm-impl needs the local API key to issue requests.
+
 `POST /api/live-debug/tool-calls` accepts the same `source`, optional `config`,
 plus:
 
@@ -432,3 +439,74 @@ allowed/required/forbidden tools, and plan violations into
 
 The integration is fail-open. If `llm-impl` is not running, the agent continues
 normally and logs a warning.
+
+## LangChain / LangGraph Adapter
+
+`@llm-impl/langchain-adapter` sits above the generic SDK and makes common
+LangChain/LangGraph integrations mostly plug-and-play.
+
+For the full adapter guide, see
+[10 LangChain / LangGraph Adapter](10-langchain-langgraph-adapter.md).
+
+It provides:
+
+- `createLangChainDebugAdapter(...)`
+- `createLangGraphDebugAdapter(...)`
+- `adapter.callbackHandler` for LangChain callback/event collection
+- `adapter.wrapTool(tool)` and `adapter.wrapTools(tools)` for live tool
+  breakpoints
+- mapping helpers such as `toDebugMessages`, `toDebugTools`, and
+  `executeToolWithLlmImplDebug`
+
+Basic LangChain shape:
+
+```ts
+import { createLangChainDebugAdapter } from '@llm-impl/langchain-adapter'
+
+const adapter = createLangChainDebugAdapter({
+  debuggerOptions: {
+    endpoint: 'http://localhost:3181',
+    project: 'langchain-demo',
+    model: 'gpt-4.1-mini',
+  },
+  sessionId,
+  getMessages: () => messages,
+  getTools: () => tools,
+  getConstraints: () => constraints,
+})
+
+const debugTools = adapter.wrapTools(tools)
+
+await executor.invoke(input, {
+  callbacks: [adapter.callbackHandler],
+})
+
+await adapter.submitRun({
+  metadata: { status: 'completed' },
+  lastRun: { stop_reason: 'completed' },
+})
+```
+
+Basic LangGraph shape:
+
+```ts
+import { ToolNode } from '@langchain/langgraph/prebuilt'
+import { createLangGraphDebugAdapter } from '@llm-impl/langchain-adapter'
+
+const adapter = createLangGraphDebugAdapter({
+  debuggerOptions: {
+    endpoint: 'http://localhost:3181',
+    project: 'langgraph-demo',
+    model: 'gpt-4.1-mini',
+  },
+  getMessages: () => graphState.messages,
+  getTools: () => tools,
+  getConstraints: () => constraintsFromGraphState(graphState),
+})
+
+const toolNode = new ToolNode(adapter.wrapTools(tools))
+```
+
+For durable LangGraph pauses, use the lower-level `adapter.debugger` methods
+inside a node and pair them with LangGraph `interrupt()` / checkpoint resume.
+See [examples](../examples/README.md) for concrete patterns.
