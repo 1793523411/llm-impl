@@ -99,6 +99,7 @@ export const SkillConfig = z.object({
   userUploaded: z.boolean().optional(),
   source: z.enum(['skill-md', 'manual']).default('skill-md').optional(),
   preload: z.boolean().default(false).optional(),
+  requiresRunCommand: z.boolean().optional(),
   // Legacy manual skill fields kept so old case JSON can still load.
   instruction: z.string().optional(),
   input_schema: z.record(z.unknown()).optional(),

@@ -63,6 +63,7 @@ interface Store {
   lastUsage: Usage | null
   lastLatency: number | null
   lastStopReason: string | null
+  runningToolResults: Record<string, true>
 
   // providers
   providers: ProviderInfo[]
@@ -390,6 +391,8 @@ function buildSkillCatalog(skills: SkillConfig[]): string {
     'Skills are NOT tools. You CANNOT call a skill name as a tool.',
     'To use a skill, you MUST first call the `load_skill` tool with the skill name.',
     'The `load_skill` tool will return instructions and context for the skill.',
+    'After a skill has been loaded once in this conversation, do not call `load_skill` for the same skill again unless the user asks to refresh it.',
+    'If a loaded skill requires a tool that is not available, explain which tool is missing instead of reloading the skill.',
     'Only load skills that are relevant to the current task.',
     'When executing skill scripts via run_command, always set working_directory to the skill directory shown in parentheses.',
     '',
@@ -417,6 +420,7 @@ export const useStore = create<Store>()(
       lastUsage: null,
       lastLatency: null,
       lastStopReason: null,
+      runningToolResults: {},
       providers: [],
       execTools: [],
       cases: [],
@@ -800,10 +804,15 @@ export const useStore = create<Store>()(
             lastUsage: usage,
             lastLatency: latency,
             lastStopReason: stopReason,
+            runningToolResults: {},
           })
         } catch (e) {
           flushPendingDraft?.()
-          set({ status: 'error', error: (e as Error).message })
+          set({
+            status: 'error',
+            error: (e as Error).message,
+            runningToolResults: {},
+          })
         }
       },
 
@@ -815,6 +824,7 @@ export const useStore = create<Store>()(
           lastUsage: null,
           lastLatency: null,
           lastStopReason: null,
+          runningToolResults: {},
           currentCaseDebug: null,
         }),
 
@@ -840,6 +850,7 @@ export const useStore = create<Store>()(
           lastUsage: null,
           lastLatency: null,
           lastStopReason: null,
+          runningToolResults: {},
           currentCasePath: path,
           currentCaseMeta: data.meta ?? null,
           currentCaseDebug: data.debug ?? null,
@@ -868,6 +879,7 @@ export const useStore = create<Store>()(
           lastUsage: parsed.lastRun?.usage ?? null,
           lastLatency: parsed.lastRun?.latency_ms ?? null,
           lastStopReason: parsed.lastRun?.stop_reason ?? null,
+          runningToolResults: {},
           currentCaseMeta: parsed.meta ?? null,
           currentCaseDebug: parsed.debug ?? null,
         })
@@ -899,6 +911,7 @@ export const useStore = create<Store>()(
                 lastUsage: data.lastRun?.usage ?? null,
                 lastLatency: data.lastRun?.latency_ms ?? null,
                 lastStopReason: data.lastRun?.stop_reason ?? null,
+                runningToolResults: {},
               })
               return
             } catch {
@@ -923,6 +936,7 @@ export const useStore = create<Store>()(
             lastUsage: ws.lastUsage ?? null,
             lastLatency: ws.lastLatency ?? null,
             lastStopReason: ws.lastStopReason ?? null,
+            runningToolResults: {},
           })
         } catch (e) {
           set({ error: (e as Error).message })
@@ -970,11 +984,34 @@ export const useStore = create<Store>()(
       },
 
       runRegisteredTool: async (msgIdx, blockIdx) => {
-        const { messages, execTools, tools, sandbox } = get()
+        const {
+          messages,
+          execTools,
+          sandbox,
+          runningToolResults,
+          currentCasePath,
+        } = get()
         const msg = messages[msgIdx]
         if (!msg || msg.role !== 'user') return
         const block = msg.content[blockIdx]
         if (!block || block.type !== 'tool_result') return
+        const casePathAtStart = currentCasePath
+        const targetToolUseId = block.tool_use_id
+        const toolRunKey = block.tool_use_id || `${msgIdx}:${blockIdx}`
+        if (runningToolResults[toolRunKey]) return
+        set((s) => ({
+          runningToolResults: {
+            ...s.runningToolResults,
+            [toolRunKey]: true,
+          },
+        }))
+        const clearToolRun = () =>
+          set((s) => {
+            if (!s.runningToolResults[toolRunKey]) return {}
+            const next = { ...s.runningToolResults }
+            delete next[toolRunKey]
+            return { runningToolResults: next }
+          })
         // find the corresponding tool_use to know the name + input
         let tu: Extract<AssistantContentBlock, { type: 'tool_use' }> | null =
           null
@@ -1007,27 +1044,42 @@ export const useStore = create<Store>()(
                 : m,
             ) as Message[],
           }))
+          clearToolRun()
           return
         }
         const writeToolResult = (result: ExecToolResponse) => {
-          set((s) => ({
-            messages: s.messages.map((m, i) =>
-              i === msgIdx
-                ? {
-                    ...m,
-                    content: m.content.map((b, j) =>
-                      j === blockIdx
-                        ? {
-                            ...b,
-                            content: result.content,
-                            is_error: result.is_error ?? false,
-                          }
-                        : b,
-                    ),
-                  }
-                : m,
-            ) as Message[],
-          }))
+          set((s) => {
+            const targetMessage = s.messages[msgIdx]
+            const targetBlock = targetMessage?.content[blockIdx]
+            if (
+              s.currentCasePath !== casePathAtStart ||
+              !targetMessage ||
+              targetMessage.role !== 'user' ||
+              !targetBlock ||
+              targetBlock.type !== 'tool_result' ||
+              targetBlock.tool_use_id !== targetToolUseId
+            ) {
+              return {}
+            }
+            return {
+              messages: s.messages.map((m, i) =>
+                i === msgIdx
+                  ? {
+                      ...m,
+                      content: m.content.map((b, j) =>
+                        j === blockIdx
+                          ? {
+                              ...b,
+                              content: result.content,
+                              is_error: result.is_error ?? false,
+                            }
+                          : b,
+                      ),
+                    }
+                  : m,
+              ) as Message[],
+            }
+          })
         }
 
         const skillName =
@@ -1046,37 +1098,52 @@ export const useStore = create<Store>()(
           )
           .find(({ server, tool }) => toolNameForMcpTool(server, tool) === tu!.name)
 
-        const builtInToolIsSelected =
-          tools.some((tool) => tool.name === tu!.name) &&
-          execTools.some((tool) => tool.name === tu!.name)
+        const registeredExecTool = execTools.some((tool) => tool.name === tu!.name)
 
         if (tu.name === 'load_skill' && !skill) {
           writeToolResult({
             content: `Error: Unknown or disabled skill '${skillName || '(empty)'}'.`,
             is_error: true,
           })
+          clearToolRun()
           return
         }
 
-        if (!skill && !mcpMatch && !builtInToolIsSelected) {
+        if (!skill && !mcpMatch && !registeredExecTool) {
           writeToolResult({
             content: `tool '${tu!.name}' is not configured as a runnable tool`,
             is_error: true,
           })
+          clearToolRun()
           return
         }
         try {
-          const result = skill
-            ? await api.loadSkill(skill)
-            : mcpMatch
-              ? await api.callMcpTool(mcpMatch.server, mcpMatch.tool.name, tu.input)
-              : await api.execTool(tu.name, tu.input, sandbox)
-          writeToolResult(result)
+          if (skill) {
+            writeToolResult(await api.loadSkill(skill))
+          } else if (mcpMatch) {
+            writeToolResult(
+              await api.callMcpTool(mcpMatch.server, mcpMatch.tool.name, tu.input),
+            )
+          } else {
+            let sawResult = false
+            for await (const event of api.execToolStream(tu.name, tu.input, sandbox)) {
+              sawResult = true
+              writeToolResult(event.result)
+            }
+            if (!sawResult) {
+              writeToolResult({
+                content: `tool '${tu.name}' stream ended without a result`,
+                is_error: true,
+              })
+            }
+          }
         } catch (e) {
           writeToolResult({
             content: (e as Error).message,
             is_error: true,
           })
+        } finally {
+          clearToolRun()
         }
       },
 
@@ -1088,10 +1155,7 @@ export const useStore = create<Store>()(
         if (name === 'load_skill' && state.skills.some((skill) => skill.enabled)) {
           return true
         }
-        if (
-          state.tools.some((tool) => tool.name === name) &&
-          state.execTools.some((tool) => tool.name === name)
-        ) {
+        if (state.execTools.some((tool) => tool.name === name)) {
           return true
         }
         return state.mcpServers.some(
@@ -1139,6 +1203,7 @@ export const useStore = create<Store>()(
           lastUsage: data.lastRun?.usage ?? null,
           lastLatency: data.lastRun?.latency_ms ?? null,
           lastStopReason: data.lastRun?.stop_reason ?? null,
+          runningToolResults: {},
           currentCasePath: path,
           currentCaseMeta: data.meta ?? null,
           currentCaseDebug: data.debug ?? null,

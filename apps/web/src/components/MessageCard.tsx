@@ -75,6 +75,91 @@ function constraintsText(
     .join('\n\n')
 }
 
+type ParsedRunCommandResult = {
+  status?: string
+  command?: string
+  cwd?: string
+  sandbox?: string
+  exitCode?: string
+  signal?: string
+  note?: string
+  stdout?: string
+  stderr?: string
+}
+
+const RUN_COMMAND_MARKER = '[run_command]'
+
+function parseRunCommandResults(content: string): ParsedRunCommandResult[] {
+  const normalized = content.replace(/\r\n/g, '\n')
+  const chunks: string[] = []
+  let current: string[] | null = null
+
+  for (const line of normalized.split('\n')) {
+    if (line.trim() === RUN_COMMAND_MARKER) {
+      if (current) chunks.push(current.join('\n'))
+      current = [line]
+      continue
+    }
+    if (current) current.push(line)
+  }
+  if (current) chunks.push(current.join('\n'))
+
+  return chunks
+    .map(parseRunCommandChunk)
+    .filter((result): result is ParsedRunCommandResult => result !== null)
+}
+
+function parseRunCommandChunk(chunk: string): ParsedRunCommandResult | null {
+  const body = chunk.replace(/^\[run_command\]\n?/, '')
+  const stdoutToken = '\nstdout:\n'
+  const stderrToken = '\nstderr:\n'
+  const stdoutIndex = body.indexOf(stdoutToken)
+  const stderrIndex = body.indexOf(stderrToken)
+  const sectionIndexes = [stdoutIndex, stderrIndex].filter((index) => index >= 0)
+  const headerEnd = sectionIndexes.length ? Math.min(...sectionIndexes) : body.length
+  const headerText = body.slice(0, headerEnd)
+  const fields: Record<string, string> = {}
+
+  for (const line of headerText.split('\n')) {
+    const separator = line.indexOf(': ')
+    if (separator <= 0) continue
+    fields[line.slice(0, separator)] = line.slice(separator + 2)
+  }
+
+  if (!fields.command && !fields.status) return null
+
+  const stdout =
+    stdoutIndex >= 0
+      ? body
+          .slice(
+            stdoutIndex + stdoutToken.length,
+            stderrIndex > stdoutIndex ? stderrIndex : body.length,
+          )
+          .trimEnd()
+      : undefined
+  const stderr =
+    stderrIndex >= 0
+      ? body
+          .slice(
+            stderrIndex + stderrToken.length,
+            stdoutIndex > stderrIndex ? stdoutIndex : body.length,
+          )
+          .trimEnd()
+      : undefined
+
+  return {
+    status: fields.status,
+    command: fields.command,
+    cwd: fields.cwd,
+    sandbox: fields.sandbox,
+    exitCode: fields.exit_code,
+    signal: fields.signal,
+    note: fields.note,
+    stdout,
+    stderr,
+  }
+}
+
 export const MessageCard = memo(function MessageCard({
   message,
   index,
@@ -363,6 +448,7 @@ function ToolResultBlockEditor({
   const execTools = useStore((s) => s.execTools)
   const skills = useStore((s) => s.skills)
   const mcpServers = useStore((s) => s.mcpServers)
+  const runningToolResults = useStore((s) => s.runningToolResults)
   const canRunTool = useStore((s) => s.canRunTool)
   const runRegisteredTool = useStore((s) => s.runRegisteredTool)
   const currentCaseDebug = useStore((s) => s.currentCaseDebug)
@@ -386,7 +472,11 @@ function ToolResultBlockEditor({
   }
   const canRun =
     !!matchingToolName && canRunTool(matchingToolName)
+  const isRunningTool = Boolean(
+    block.tool_use_id && runningToolResults[block.tool_use_id],
+  )
   const failed = isToolResultError(block)
+  const runCommandResults = parseRunCommandResults(block.content)
 
   return (
     <BlockShell
@@ -442,13 +532,21 @@ function ToolResultBlockEditor({
         {canRun && (
           <button
             className="btn"
-            title={`Execute ${matchingToolName} on the server and fill in the result`}
-            onClick={() => runRegisteredTool(msgIdx, blockIdx)}
+            disabled={isRunningTool}
+            title={
+              isRunningTool
+                ? `Executing ${matchingToolName}; waiting for the server result`
+                : `Execute ${matchingToolName} on the server and fill in the result`
+            }
+            onClick={() => void runRegisteredTool(msgIdx, blockIdx)}
           >
-            ▶ run {matchingToolName}
+            {isRunningTool ? `running ${matchingToolName}...` : `▶ run ${matchingToolName}`}
           </button>
         )}
       </div>
+      {runCommandResults.length > 0 && (
+        <RunCommandOutputList results={runCommandResults} />
+      )}
       {mode === 'preview' ? (
         <MarkdownPreview className={`mt-1 ${block.is_error ? 'is-error' : ''}`}>
           {block.content}
@@ -471,6 +569,151 @@ function ToolResultBlockEditor({
         is_error
       </label>
     </BlockShell>
+  )
+}
+
+function RunCommandOutputList({ results }: { results: ParsedRunCommandResult[] }) {
+  return (
+    <div className="run-command-output-list">
+      {results.map((result, index) => (
+        <RunCommandOutputPanel
+          key={`${result.command ?? 'command'}-${index}`}
+          result={result}
+          index={index}
+        />
+      ))}
+    </div>
+  )
+}
+
+function RunCommandOutputPanel({
+  result,
+  index,
+}: {
+  result: ParsedRunCommandResult
+  index: number
+}) {
+  const statusClass =
+    result.status === 'success'
+      ? 'is-success'
+      : result.status === 'failed' || result.status === 'timeout'
+        ? 'is-error'
+        : ''
+  const hasStdout = typeof result.stdout === 'string' && result.stdout.length > 0
+  const hasStderr = typeof result.stderr === 'string' && result.stderr.length > 0
+
+  return (
+    <div className="run-command-output">
+      <div className="run-command-output-header">
+        <div className="run-command-output-title">
+          <span>command {index + 1}</span>
+          {result.status && (
+            <span className={`run-command-status ${statusClass}`}>
+              {result.status}
+            </span>
+          )}
+          {result.exitCode && <span>exit {result.exitCode}</span>}
+          {result.signal && <span>signal {result.signal}</span>}
+        </div>
+        {result.command && (
+          <CopyButton
+            label="Copy command"
+            copiedLabel="Copied"
+            value={result.command}
+          />
+        )}
+      </div>
+      {result.command && <code className="run-command-line">{result.command}</code>}
+      <div className="run-command-meta">
+        {result.cwd && <span>cwd: {result.cwd}</span>}
+        {result.sandbox && <span>sandbox: {result.sandbox}</span>}
+        {result.note && <span>note: {result.note}</span>}
+      </div>
+      <CommandStreamDetails
+        label="stdout"
+        value={result.stdout}
+        defaultOpen={hasStdout}
+      />
+      <CommandStreamDetails
+        label="stderr"
+        value={result.stderr}
+        defaultOpen={hasStderr}
+        tone={hasStderr ? 'error' : undefined}
+      />
+    </div>
+  )
+}
+
+function CommandStreamDetails({
+  label,
+  value,
+  defaultOpen,
+  tone,
+}: {
+  label: 'stdout' | 'stderr'
+  value: string | undefined
+  defaultOpen: boolean
+  tone?: 'error'
+}) {
+  const content = value || '(empty)'
+  const [isOpen, setIsOpen] = useState(defaultOpen)
+  const userToggledRef = useRef(false)
+
+  useEffect(() => {
+    if (defaultOpen && !userToggledRef.current) {
+      setIsOpen(true)
+    }
+  }, [defaultOpen])
+
+  return (
+    <details
+      className="command-stream"
+      open={isOpen}
+      onToggle={(event) => {
+        userToggledRef.current = true
+        setIsOpen(event.currentTarget.open)
+      }}
+    >
+      <summary>
+        <span className={tone === 'error' ? 'text-red-400' : ''}>{label}</span>
+        <span>{content.length.toLocaleString()} chars</span>
+        <CopyButton
+          label={`Copy ${label}`}
+          copiedLabel="Copied"
+          value={value ?? ''}
+        />
+      </summary>
+      <pre className="command-stream-body scrollbar">{content}</pre>
+    </details>
+  )
+}
+
+function CopyButton({
+  label,
+  copiedLabel,
+  value,
+}: {
+  label: string
+  copiedLabel: string
+  value: string
+}) {
+  const [copied, setCopied] = useState(false)
+
+  return (
+    <button
+      className="btn-ghost copy-output-button"
+      disabled={!value}
+      onClick={async (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        await navigator.clipboard.writeText(value)
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1200)
+      }}
+      title={value ? label : 'Nothing to copy'}
+    >
+      {copied ? copiedLabel : label}
+    </button>
   )
 }
 
