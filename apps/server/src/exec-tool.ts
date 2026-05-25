@@ -12,11 +12,17 @@ type ToolImpl = ExecToolDef & {
   ) => Promise<ExecToolResponse>
 }
 
-type CommandStatus = 'success' | 'failed' | 'timeout' | 'blocked'
+export type ExecToolStreamEvent = {
+  type: 'result'
+  result: ExecToolResponse
+}
+
+type CommandStatus = 'running' | 'success' | 'failed' | 'timeout' | 'blocked'
 type SandboxMode = 'workspace-write' | 'read-only'
 type SandboxNetwork = 'blocked' | 'allowed'
 type ToolContext = {
   sandbox?: SandboxConfig
+  onRunCommandProgress?: (response: ExecToolResponse) => void
 }
 type ResolvedSandboxConfig = {
   enabled: boolean
@@ -424,7 +430,9 @@ async function commandSpawnConfig(
   return {
     file: '/bin/sh',
     args: ['-c', command],
-    label: `${sandbox.enabled ? 'soft-path-guard' : 'sandbox-disabled'}:${sandbox.mode}:network-${sandbox.network}${configLabel}`,
+    label: sandbox.enabled
+      ? `soft-path-guard:${sandbox.mode}:network-${sandbox.network}${configLabel}`
+      : `sandbox-disabled${configLabel}`,
   }
 }
 
@@ -461,28 +469,31 @@ async function runCommandHandler(
 
   const requestedCwd = asString(input.working_directory).trim()
   const cwd = requestedCwd ? path.resolve(requestedCwd) : process.cwd()
-  const allowedCwd = await requireAllowedPath(
-    cwd,
-    'working_directory',
-    [...sandbox.allowedRoots, ...sandbox.writableRoots],
-  )
-  if (!allowedCwd.ok) {
+  const resolvedCwd = sandbox.enabled
+    ? await requireAllowedPath(
+        cwd,
+        'working_directory',
+        [...sandbox.allowedRoots, ...sandbox.writableRoots],
+      )
+    : { ok: true as const, realPath: (await realExistingPath(cwd)) ?? cwd, roots: [] }
+
+  if (!resolvedCwd.ok) {
     return {
       content: formatRunCommandResult({
         status: 'blocked',
         command,
         cwd,
-        note: allowedCwd.response.content,
+        note: resolvedCwd.response.content,
       }),
       is_error: true,
     }
   }
-  if (!(await directoryExists(allowedCwd.realPath))) {
+  if (!(await directoryExists(resolvedCwd.realPath))) {
     return {
       content: formatRunCommandResult({
         status: 'failed',
         command,
-        cwd: allowedCwd.realPath,
+        cwd: resolvedCwd.realPath,
         note: 'working_directory does not exist or is not a directory',
       }),
       is_error: true,
@@ -501,16 +512,18 @@ async function runCommandHandler(
       is_error: true,
     }
   }
-  const disallowedPathRef = await findDisallowedCommandPathRef(
-    command,
-    [...allowedCwd.roots, ...sandbox.allowedRoots, ...sandbox.writableRoots],
-  )
+  const disallowedPathRef = sandbox.enabled
+    ? await findDisallowedCommandPathRef(
+        command,
+        [...resolvedCwd.roots, ...sandbox.allowedRoots, ...sandbox.writableRoots],
+      )
+    : null
   if (disallowedPathRef) {
     return {
       content: formatRunCommandResult({
         status: 'blocked',
         command,
-        cwd: allowedCwd.realPath,
+        cwd: resolvedCwd.realPath,
         note: `command references a path outside allowed roots: ${disallowedPathRef}`,
       }),
       is_error: true,
@@ -524,24 +537,49 @@ async function runCommandHandler(
   )
   const spawnConfig = await commandSpawnConfig(
     command,
-    allowedCwd.realPath,
+    resolvedCwd.realPath,
     sandbox,
   )
 
   return new Promise<ExecToolResponse>((resolve) => {
     const child = spawn(spawnConfig.file, spawnConfig.args, {
-      cwd: allowedCwd.realPath,
+      cwd: resolvedCwd.realPath,
       env: commandEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
     let stderr = ''
     let settled = false
+    let progressTimer: ReturnType<typeof setTimeout> | null = null
     const cap = (text: string) => truncateMiddle(text, MAX_COMMAND_OUTPUT_CHARS)
+    const runningResponse = (): ExecToolResponse => ({
+      content: formatRunCommandResult({
+        status: 'running',
+        command,
+        cwd: resolvedCwd.realPath,
+        sandbox: spawnConfig.label,
+        stdout: stdout.trimEnd() || undefined,
+        stderr: stderr.trimEnd() || undefined,
+      }),
+      is_error: false,
+    })
+    const emitProgress = (force = false) => {
+      if (!context.onRunCommandProgress || settled) return
+      if (progressTimer) return
+      if (force) {
+        context.onRunCommandProgress(runningResponse())
+        return
+      }
+      progressTimer = setTimeout(() => {
+        progressTimer = null
+        if (!settled) context.onRunCommandProgress?.(runningResponse())
+      }, 100)
+    }
     const finish = (response: ExecToolResponse) => {
       if (settled) return
       settled = true
       clearTimeout(timeout)
+      if (progressTimer) clearTimeout(progressTimer)
       resolve(response)
     }
     const timeout = setTimeout(() => {
@@ -550,7 +588,7 @@ async function runCommandHandler(
         content: formatRunCommandResult({
           status: 'timeout',
           command,
-          cwd: allowedCwd.realPath,
+          cwd: resolvedCwd.realPath,
           sandbox: spawnConfig.label,
           stdout: stdout.trimEnd() || undefined,
           stderr: stderr.trimEnd() || undefined,
@@ -564,10 +602,13 @@ async function runCommandHandler(
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', (chunk: string) => {
       stdout = cap(stdout + chunk)
+      emitProgress()
     })
     child.stderr.on('data', (chunk: string) => {
       stderr = cap(stderr + chunk)
+      emitProgress()
     })
+    emitProgress(true)
     child.on('error', (error) => {
       finish({ content: error.message, is_error: true })
     })
@@ -577,7 +618,7 @@ async function runCommandHandler(
         content: formatRunCommandResult({
           status: ok ? 'success' : 'failed',
           command,
-          cwd: allowedCwd.realPath,
+          cwd: resolvedCwd.realPath,
           sandbox: spawnConfig.label,
           stdout: stdout.trimEnd() || '(no output)',
           stderr: stderr.trimEnd() || undefined,
@@ -1280,7 +1321,7 @@ const tools: ToolImpl[] = [
   {
     name: 'run_command',
     description:
-      'Run a sandboxed local shell command for debugging scripts or skill bash snippets. Returns status, cwd, sandbox mode, exit code, stdout, and stderr.',
+      'Run a local shell command for debugging scripts or skill bash snippets. Defaults to sandboxed path/network guards; sandbox_enabled=false disables those run_command guards while keeping dangerous-command checks. Returns status, cwd, sandbox label, exit code, stdout, and stderr.',
     input_schema: {
       type: 'object',
       properties: {
@@ -1319,7 +1360,7 @@ const tools: ToolImpl[] = [
         sandbox_enabled: {
           type: 'boolean',
           description:
-            'Disable OS sandbox for this command when false. Path allowlist and dangerous command checks still apply.',
+            'When false, run_command skips OS sandbox, path allowlist, command path-reference checks, and network sandboxing. Dangerous command checks, timeout, output truncation, and inherited process permissions still apply.',
         },
       },
       required: ['command'],
@@ -1601,5 +1642,62 @@ export async function execTool(
     return await tool.handler(inputObj, { sandbox })
   } catch (e) {
     return { content: `tool error: ${(e as Error).message}`, is_error: true }
+  }
+}
+
+export async function* execToolStream(
+  name: string,
+  input: unknown,
+  sandbox?: SandboxConfig,
+): AsyncGenerator<ExecToolStreamEvent> {
+  const tool = tools.find((t) => t.name === name)
+  if (!tool) {
+    yield { type: 'result', result: { content: `unknown tool: ${name}`, is_error: true } }
+    return
+  }
+  const inputObj =
+    input && typeof input === 'object' && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {}
+
+  if (name !== 'run_command') {
+    yield { type: 'result', result: await execTool(name, inputObj, sandbox) }
+    return
+  }
+
+  type QueuedEvent = ExecToolStreamEvent & { final: boolean }
+  const queue: QueuedEvent[] = []
+  let wake: (() => void) | null = null
+  let finished = false
+  const push = (event: QueuedEvent) => {
+    queue.push(event)
+    wake?.()
+    wake = null
+  }
+  const waitForEvent = () =>
+    new Promise<void>((resolve) => {
+      wake = resolve
+    })
+
+  void runCommandHandler(inputObj, {
+    sandbox,
+    onRunCommandProgress: (result) => push({ type: 'result', result, final: false }),
+  }).then(
+    (result) => push({ type: 'result', result, final: true }),
+    (e) =>
+      push({
+        type: 'result',
+        result: { content: `tool error: ${(e as Error).message}`, is_error: true },
+        final: true,
+      }),
+  )
+
+  while (!finished) {
+    if (queue.length === 0) await waitForEvent()
+    while (queue.length > 0) {
+      const event = queue.shift()!
+      finished = event.final
+      yield { type: event.type, result: event.result }
+    }
   }
 }

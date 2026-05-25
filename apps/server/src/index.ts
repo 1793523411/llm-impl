@@ -26,7 +26,7 @@ import {
 } from './cases'
 import { publicProviders } from './providers'
 import { readWorkspace, writeWorkspace } from './workspace'
-import { execTool, listTools } from './exec-tool'
+import { execTool, execToolStream, listTools } from './exec-tool'
 import { callMcpTool, listMcpTools } from './mcp'
 import { listSkills, loadSkillContent } from './skills'
 import { buildRunnableCurl } from './curl'
@@ -226,6 +226,37 @@ app.post('/api/exec-tool', async (c) => {
     parsed.data.sandbox,
   )
   return c.json(result)
+})
+
+app.post('/api/exec-tool/stream', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const parsed = ExecToolRequest.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400)
+  }
+  c.header('content-type', 'application/x-ndjson')
+  c.header('cache-control', 'no-cache')
+  return honoStream(c, async (s) => {
+    try {
+      for await (const event of execToolStream(
+        parsed.data.name,
+        parsed.data.input ?? {},
+        parsed.data.sandbox,
+      )) {
+        await s.write(JSON.stringify(event) + '\n')
+      }
+    } catch (e) {
+      await s.write(
+        JSON.stringify({
+          type: 'result',
+          result: {
+            content: `tool error: ${(e as Error).message}`,
+            is_error: true,
+          },
+        }) + '\n',
+      )
+    }
+  })
 })
 
 app.post('/api/mcp/list-tools', async (c) => {

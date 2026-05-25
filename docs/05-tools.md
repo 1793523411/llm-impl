@@ -81,7 +81,7 @@
 | name | 干啥 | 安全约束 |
 |---|---|---|
 | `get_time` | 返回当前日期、时间、星期、时区、timestamp | 无副作用，可指定 IANA timezone |
-| `run_command` | 执行本地 shell 命令，适合调试 skill 里的 bash/script | 默认 sandbox；工作目录必须在 allowlist 内；macOS 下用 `sandbox-exec` 限制写入范围并禁用网络；危险系统命令拦截；默认 60s 超时，输出截断 |
+| `run_command` | 执行本地 shell 命令，适合调试 skill 里的 bash/script | 默认 sandbox；工作目录必须在 allowlist 内；macOS 下用 `sandbox-exec` 限制写入范围并禁用网络；`sandbox_enabled:false` 会关闭 run_command 的路径、写入和网络限制；危险系统命令拦截；默认 60s 超时，输出截断；UI 手动执行时会流式更新 stdout/stderr 快照 |
 | `read_file` | 读取本地文本文件，带行号 | 只能读 allowlist 内路径；大文件需要 `offset` / `limit` |
 | `write_file` | 创建或覆盖本地 UTF-8 文本文件 | 只能写 sandbox 可写根；默认不覆盖已有文件，默认不创建父目录；单次最多 512KiB |
 | `edit_file` | 精确替换本地 UTF-8 文本文件中的片段 | 只能编辑 sandbox 可写根内已有文件；默认要求 `old_text` 只匹配一次；支持 `dry_run` 和 `expected_replacements`；单文件最多 512KiB |
@@ -102,6 +102,7 @@
 - `write_file` / `edit_file` 在 `workspace-write` 下允许写 allowlist / writable roots / 临时目录；在 `read-only` 下只允许写 writable roots / 临时目录
 - macOS sandbox 默认禁用网络访问，并拒绝命令里直接引用 allowlist 外的绝对路径
 - macOS 有 `/usr/bin/sandbox-exec` 时会使用 OS sandbox；其他系统退化为路径 allowlist + 精简环境变量 + 危险命令拦截
+- 设置 `sandbox_enabled:false` 时，`run_command` 会跳过 OS sandbox、工作目录 allowlist、命令绝对路径引用检查和网络 sandbox，以普通 shell 进程权限执行；危险命令模式、超时和输出截断仍然生效
 
 沙箱配置有三层，后者覆盖前者：
 

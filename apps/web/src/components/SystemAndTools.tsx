@@ -29,8 +29,24 @@ const tabs: Array<{ id: SetupTab; label: string }> = [
   { id: 'input', label: 'Model Input' },
 ]
 
+const RUN_COMMAND_TOOL_NAME = 'run_command'
+const RUN_COMMAND_SKILL_HINT_REG =
+  /\b(run_command|lgcli|cli|terminal|shell|bash|command-line)\b/i
+
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value))
+
+function skillNeedsRunCommand(skill: SkillConfig): boolean {
+  if (skill.requiresRunCommand !== undefined) return skill.requiresRunCommand
+  return RUN_COMMAND_SKILL_HINT_REG.test(
+    [skill.name, skill.description, skill.instruction].filter(Boolean).join('\n'),
+  )
+}
+
+function formatSkillNames(names: string[]): string {
+  if (names.length <= 3) return names.join(', ')
+  return `${names.slice(0, 3).join(', ')} and ${names.length - 3} more`
+}
 
 function storedHeight(key: string, fallback: number): number {
   const raw = localStorage.getItem(key)
@@ -137,6 +153,7 @@ function SystemPromptTab() {
 function ToolsTab() {
   const tools = useStore((s) => s.tools)
   const execTools = useStore((s) => s.execTools)
+  const skills = useStore((s) => s.skills)
   const setBuiltinToolEnabled = useStore((s) => s.setBuiltinToolEnabled)
   const removeTool = useStore((s) => s.removeTool)
   const refreshExecTools = useStore((s) => s.refreshExecTools)
@@ -176,6 +193,13 @@ function ToolsTab() {
         <div className="setup-empty-state">No built-in tools loaded</div>
       )}
 
+      <RunCommandSkillWarning
+        skills={skills}
+        tools={tools}
+        execTools={execTools}
+        onEnable={() => setBuiltinToolEnabled(RUN_COMMAND_TOOL_NAME, true)}
+      />
+
       {execTools.length > 0 && (
         <div className="space-y-2">
           {execTools.map((tool) => (
@@ -207,6 +231,53 @@ function ToolsTab() {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function RunCommandSkillWarning({
+  skills,
+  tools,
+  execTools,
+  onEnable,
+}: {
+  skills: SkillConfig[]
+  tools: Tool[]
+  execTools: ExecToolDef[]
+  onEnable: () => void
+}) {
+  const affectedSkills = skills
+    .filter((skill) => skill.enabled && skillNeedsRunCommand(skill))
+    .map((skill) => skill.name)
+  const runCommandAvailable = execTools.some(
+    (tool) => tool.name === RUN_COMMAND_TOOL_NAME,
+  )
+  const runCommandExposed = tools.some((tool) => tool.name === RUN_COMMAND_TOOL_NAME)
+
+  if (affectedSkills.length === 0 || runCommandExposed) return null
+
+  return (
+    <div className="setup-warning-card">
+      <div className="setup-warning-title">
+        Enabled skills may need <span className="font-mono">{RUN_COMMAND_TOOL_NAME}</span>
+      </div>
+      <div>
+        {formatSkillNames(affectedSkills)} can ask the model to run shell/CLI steps. Without
+        <span className="font-mono"> {RUN_COMMAND_TOOL_NAME}</span> exposed, the model may
+        keep reloading the skill instead of executing the next step.
+      </div>
+      <div className="setup-warning-actions">
+        <button
+          className="btn btn-primary"
+          disabled={!runCommandAvailable}
+          onClick={onEnable}
+        >
+          Enable run_command
+        </button>
+        {!runCommandAvailable && (
+          <span>Refresh built-in tools before enabling run_command.</span>
+        )}
+      </div>
     </div>
   )
 }
@@ -380,6 +451,8 @@ function SandboxTab() {
           <div className="label">case sandbox</div>
           <div className="mt-1 text-xs text-zinc-500">
             Saved into this case JSON and inherited by runnable built-in tools.
+            For run_command, disabling sandbox removes path, write, and network
+            guards for that command.
           </div>
         </div>
         <span className={`tool-status ${sandbox ? 'is-enabled' : ''}`}>
@@ -400,12 +473,18 @@ function SandboxTab() {
             onChange={(e) =>
               updateSandbox(
                 { enabled: e.target.checked },
-                e.target.checked ? 'OS sandbox enabled' : 'OS sandbox disabled',
+                e.target.checked ? 'Command sandbox enabled' : 'Command sandbox disabled',
               )
             }
           />
-          enable OS sandbox when available
+          enable run_command sandbox and path guards
         </label>
+        {effectiveSandbox.enabled === false && (
+          <div className="sandbox-disabled-notice">
+            run_command will run from any existing working directory using normal
+            process permissions. Dangerous command checks and timeouts still apply.
+          </div>
+        )}
 
         <div>
           <div className="label mb-1">label</div>
@@ -477,7 +556,8 @@ function SandboxTab() {
             }}
           />
           <div className="mt-1 text-[10px] text-zinc-600">
-            Read/search/list and command working directories must stay inside these roots or server defaults.
+            Used by read/search/list tools, and by run_command only while its
+            sandbox is enabled.
           </div>
         </div>
 
@@ -544,8 +624,9 @@ function SandboxTab() {
 
       <div className="text-[10px] leading-4 text-zinc-500">
         Fields: enabled, label, mode, network, allowedRoots, writableRoots.
-        Per-command input can still override mode, network, allowed roots, and
-        writable roots for a single tool call.
+        enabled=false disables run_command sandbox/path/network guards. Per-command
+        input can still override mode, network, allowed roots, writable roots, and
+        enabled for a single tool call.
       </div>
     </div>
   )
@@ -553,11 +634,14 @@ function SandboxTab() {
 
 function SkillsTab() {
   const skills = useStore((s) => s.skills)
+  const tools = useStore((s) => s.tools)
+  const execTools = useStore((s) => s.execTools)
   const skillRoots = useStore((s) => s.skillRoots)
   const setSkillRoots = useStore((s) => s.setSkillRoots)
   const refreshSkills = useStore((s) => s.refreshSkills)
   const updateSkill = useStore((s) => s.updateSkill)
   const removeSkill = useStore((s) => s.removeSkill)
+  const setBuiltinToolEnabled = useStore((s) => s.setBuiltinToolEnabled)
   const [rootsText, setRootsText] = useState(() => skillRoots.join('\n'))
   const [refreshing, setRefreshing] = useState(false)
   const [alertMessage, setAlertMessage] = useState<string | null>(null)
@@ -609,6 +693,13 @@ function SkillsTab() {
           {refreshing ? 'Discovering...' : 'Discover'}
         </button>
       </div>
+
+      <RunCommandSkillWarning
+        skills={skills}
+        tools={tools}
+        execTools={execTools}
+        onEnable={() => setBuiltinToolEnabled(RUN_COMMAND_TOOL_NAME, true)}
+      />
 
       <div>
         <div className="label mb-1">skill roots</div>

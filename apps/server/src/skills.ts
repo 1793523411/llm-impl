@@ -5,6 +5,8 @@ import type { SkillConfig } from '@llm-impl/shared'
 const FRONTMATTER_REG = /^---\r?\n([\s\S]*?)\r?\n---/
 const NAME_REG = /^name:\s*["']?([^"'\n]+)["']?\s*$/m
 const DESC_LINE_REG = /^description:\s*(.+)$/m
+const RUN_COMMAND_SKILL_HINT_REG =
+  /\b(run_command|lgcli|cli|terminal|shell|bash|command-line)\b/i
 
 function parseSkillMd(content: string): {
   name: string
@@ -54,6 +56,10 @@ async function defaultSkillRoots(): Promise<string[]> {
   return existing
 }
 
+function requiresRunCommand(parsed: { description: string; body: string }): boolean {
+  return RUN_COMMAND_SKILL_HINT_REG.test(`${parsed.description}\n${parsed.body}`)
+}
+
 export async function listSkills(roots: string[] = []): Promise<SkillConfig[]> {
   const searchRoots = roots.length > 0 ? roots : await defaultSkillRoots()
   const byName = new Map<string, SkillConfig>()
@@ -78,6 +84,7 @@ export async function listSkills(roots: string[] = []): Promise<SkillConfig[]> {
           enabled: true,
           exposeAsTool: false,
           preload: false,
+          requiresRunCommand: requiresRunCommand(parsed),
         })
       } catch {
         // Ignore folders that are not valid skill packages.

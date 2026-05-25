@@ -146,6 +146,40 @@ export async function execTool(
   return res.json()
 }
 
+export type ExecToolStreamEvent = {
+  type: 'result'
+  result: ExecToolResponse
+}
+
+export async function* execToolStream(
+  name: string,
+  input: unknown,
+  sandbox?: SandboxConfig | null,
+): AsyncGenerator<ExecToolStreamEvent> {
+  const res = await fetch('/api/exec-tool/stream', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name, input, ...(sandbox && { sandbox }) }),
+  })
+  if (!res.ok || !res.body) throw new Error(`exec-tool stream failed: ${res.status}`)
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let nl: number
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim()
+      buf = buf.slice(nl + 1)
+      if (line) yield JSON.parse(line) as ExecToolStreamEvent
+    }
+  }
+  if (buf.trim()) yield JSON.parse(buf.trim()) as ExecToolStreamEvent
+}
+
 export async function listSkills(roots: string[]): Promise<SkillListResponse> {
   const res = await fetch('/api/skills/list', {
     method: 'POST',
