@@ -1,0 +1,41 @@
+{
+  "name": "@llm-impl/langchain-adapter",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@llm-impl/debug-sdk": "workspace:*"
+  },
+  "peerDependencies": {
+    "@langchain/core": ">=0.2.0",
+    "@langchain/langgraph": ">=0.2.0",
+    "langchain": ">=0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@langchain/core": {
+      "optional": true
+    },
+    "@langchain/langgraph": {
+      "optional": true
+    },
+    "langchain": {
+      "optional": true
+    }
+  }
+}

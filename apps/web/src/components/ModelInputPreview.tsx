@@ -187,6 +187,8 @@ export function ModelInputPreview({ defaultOpen = false }: { defaultOpen?: boole
   const [copying, setCopying] = useState<CurlMode | null>(null)
 
   const currentProvider = providers.find((provider) => provider.key === config.provider)
+  const providerApi = currentProvider?.api ?? config.api
+  const providerBaseUrl = currentProvider?.baseUrl ?? config.baseUrl
   const effectiveSystem = useMemo(
     () => getEffectiveSystem(),
     [getEffectiveSystem, system, skills],
@@ -199,25 +201,25 @@ export function ModelInputPreview({ defaultOpen = false }: { defaultOpen?: boole
     () =>
       open
         ? buildPreview({
-            api: currentProvider?.api,
+            api: providerApi,
             config,
             system: effectiveSystem,
             tools: effectiveTools,
             messages,
-            providerBaseUrl: currentProvider?.baseUrl,
+            providerBaseUrl,
           })
         : null,
     [
       open,
-      currentProvider?.api,
-      currentProvider?.baseUrl,
+      providerApi,
+      providerBaseUrl,
       config,
       effectiveSystem,
       effectiveTools,
       messages,
     ],
   )
-  const previewProtocol = preview?.protocol ?? currentProvider?.api ?? 'internal'
+  const previewProtocol = preview?.protocol ?? providerApi ?? 'internal'
 
   const handleCopyCurl = async (mode: CurlMode) => {
     if (!preview || !currentProvider || copying) return

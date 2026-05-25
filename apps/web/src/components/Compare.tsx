@@ -309,8 +309,8 @@ export function Compare({ onClose }: { onClose: () => void }) {
     effectiveSystem ? 'system prompt' : 'no system prompt',
     `${effectiveTools.length} tool${effectiveTools.length === 1 ? '' : 's'}`,
     toolResultCount
-      ? `${toolResultCount} mock result${toolResultCount === 1 ? '' : 's'}`
-      : 'no mock results',
+      ? `${toolResultCount} tool result${toolResultCount === 1 ? '' : 's'}`
+      : 'no tool results',
     sandbox
       ? `sandbox: ${
           sandbox.enabled === false ? 'disabled' : sandbox.mode ?? 'workspace-write'

@@ -15,6 +15,7 @@ import type {
   Tool,
   UserContentBlock,
   Usage,
+  LiveDebugResumeAction,
 } from '@llm-impl/shared'
 import * as api from './api'
 import type { CaseEntry } from './api'
@@ -40,6 +41,7 @@ const newToolUseId = (): string =>
 const STREAM_DRAFT_FLUSH_MS = 50
 
 type CaseMeta = Case['meta']
+type CaseDebug = Case['debug']
 type SkillPatch = Partial<SkillConfig>
 type McpServerPatch = Partial<McpServerConfig>
 type McpToolPatch = Partial<McpToolConfig>
@@ -72,6 +74,7 @@ interface Store {
   cases: CaseEntry[]
   currentCasePath: string | null
   currentCaseMeta: CaseMeta | null
+  currentCaseDebug: CaseDebug | null
 
   // ─── actions ────────────────────────────────────────────────────────────
   setConfig: (patch: Partial<Config>) => void
@@ -119,6 +122,7 @@ interface Store {
   getEffectiveTools: () => Tool[]
   getEffectiveSystem: () => string
   canRunTool: (name: string) => boolean
+  resumeLivePause: (pauseId: string, resume?: LiveDebugResumeAction) => Promise<void>
   refreshCases: () => Promise<void>
   loadCase: (path: string) => Promise<void>
   saveCase: (path: string) => Promise<void>
@@ -141,6 +145,7 @@ type CaseBuildState = Pick<
   | 'lastLatency'
   | 'lastStopReason'
   | 'currentCaseMeta'
+  | 'currentCaseDebug'
 >
 
 const caseNameFromPath = (path: string): string =>
@@ -214,6 +219,13 @@ const normalizeRelPath = (value: string): string =>
 const joinRelPath = (...parts: string[]): string =>
   normalizeRelPath(parts.filter(Boolean).join('/'))
 
+const caseEntryExists = (entries: CaseEntry[], targetPath: string): boolean =>
+  entries.some(
+    (entry) =>
+      entry.path === targetPath ||
+      (entry.children ? caseEntryExists(entry.children, targetPath) : false),
+  )
+
 const newCaseFileName = (): string => {
   const d = new Date()
   const pad = (n: number, size = 2) => String(n).padStart(size, '0')
@@ -265,6 +277,7 @@ const buildCaseFromState = (
     ...(state.mcpServers.length > 0 && { mcpServers: state.mcpServers }),
     ...(state.sandbox && { sandbox: state.sandbox }),
     messages: state.messages,
+    ...(state.currentCaseDebug && { debug: state.currentCaseDebug }),
     ...(hasLastRun && {
       lastRun: {
         timestamp: new Date().toISOString(),
@@ -314,12 +327,20 @@ const stableCaseFingerprint = (path: string, data: Case): string => {
     ...(data.sandbox && { sandbox: data.sandbox }),
     messages: data.messages,
     ...(stableLastRun && { lastRun: stableLastRun }),
+    ...(data.debug && { debug: data.debug }),
     ...(Object.keys(stableMeta).length > 0 && { meta: stableMeta }),
   }
   return JSON.stringify({ path, data: stableData })
 }
 
 let lastSavedCaseFingerprint: string | null = null
+
+const isLiveDebugCaseState = (
+  state: Pick<Store, 'currentCasePath' | 'currentCaseDebug'>,
+): boolean =>
+  state.currentCasePath?.startsWith('live/') === true ||
+  state.currentCaseDebug?.metadata?.live === true ||
+  Boolean(state.currentCaseDebug?.live?.casePath)
 
 const rememberSavedCase = (path: string, data: Case) => {
   lastSavedCaseFingerprint = stableCaseFingerprint(path, data)
@@ -401,6 +422,7 @@ export const useStore = create<Store>()(
       cases: [],
       currentCasePath: null,
       currentCaseMeta: null,
+      currentCaseDebug: null,
 
       setConfig: (patch) => set((s) => ({ config: { ...s.config, ...patch } })),
       setSystem: (system) => set({ system }),
@@ -793,10 +815,14 @@ export const useStore = create<Store>()(
           lastUsage: null,
           lastLatency: null,
           lastStopReason: null,
+          currentCaseDebug: null,
         }),
 
       newCase: async (dir, name) => {
         const path = newCasePath(dir, name)
+        if (caseEntryExists(get().cases, path)) {
+          throw new Error(`case already exists: ${path}`)
+        }
         const data = freshCase(path)
         await api.writeCase(path, data)
         rememberSavedCase(path, data)
@@ -816,6 +842,7 @@ export const useStore = create<Store>()(
           lastStopReason: null,
           currentCasePath: path,
           currentCaseMeta: data.meta ?? null,
+          currentCaseDebug: data.debug ?? null,
         })
         await get().refreshCases()
       },
@@ -842,6 +869,7 @@ export const useStore = create<Store>()(
           lastLatency: parsed.lastRun?.latency_ms ?? null,
           lastStopReason: parsed.lastRun?.stop_reason ?? null,
           currentCaseMeta: parsed.meta ?? null,
+          currentCaseDebug: parsed.debug ?? null,
         })
       },
 
@@ -867,6 +895,7 @@ export const useStore = create<Store>()(
                 messages: data.messages ?? [emptyUserMessage()],
                 currentCasePath,
                 currentCaseMeta: data.meta ?? null,
+                currentCaseDebug: data.debug ?? null,
                 lastUsage: data.lastRun?.usage ?? null,
                 lastLatency: data.lastRun?.latency_ms ?? null,
                 lastStopReason: data.lastRun?.stop_reason ?? null,
@@ -890,6 +919,7 @@ export const useStore = create<Store>()(
                 : [emptyUserMessage()],
             currentCasePath,
             currentCaseMeta: null,
+            currentCaseDebug: ws.currentCaseDebug ?? null,
             lastUsage: ws.lastUsage ?? null,
             lastLatency: ws.lastLatency ?? null,
             lastStopReason: ws.lastStopReason ?? null,
@@ -903,9 +933,14 @@ export const useStore = create<Store>()(
         try {
           const providers = await api.listProviders()
           set({ providers })
-          // if current provider/model no longer valid, fall back to first
-          const { config } = get()
+          // Preserve external provider/model values captured by debug cases.
+          // Drafts still fall back to the first configured provider/model.
+          const { config, currentCaseDebug, currentCaseMeta } = get()
+          const isDebugCase = Boolean(currentCaseDebug?.source || currentCaseMeta?.source)
           const cur = providers.find((p) => p.key === config.provider)
+          if (isDebugCase && (!cur || !cur.models.some((m) => m.id === config.model))) {
+            return
+          }
           if (!cur && providers[0]) {
             const first = providers[0]
             set({
@@ -1069,6 +1104,15 @@ export const useStore = create<Store>()(
         )
       },
 
+      resumeLivePause: async (pauseId, resume = { action: 'continue' }) => {
+        await api.resumeLiveDebugPause(pauseId, resume)
+        const path = get().currentCasePath
+        if (path) {
+          await get().loadCase(path)
+        }
+        await get().refreshCases()
+      },
+
       refreshCases: async () => {
         try {
           const cases = await api.listCases()
@@ -1097,6 +1141,7 @@ export const useStore = create<Store>()(
           lastStopReason: data.lastRun?.stop_reason ?? null,
           currentCasePath: path,
           currentCaseMeta: data.meta ?? null,
+          currentCaseDebug: data.debug ?? null,
         })
       },
 
@@ -1104,7 +1149,11 @@ export const useStore = create<Store>()(
         const data = buildCaseFromState(get(), { touch: true })
         await api.writeCase(path, data)
         rememberSavedCase(path, data)
-        set({ currentCasePath: path, currentCaseMeta: data.meta ?? null })
+        set({
+          currentCasePath: path,
+          currentCaseMeta: data.meta ?? null,
+          currentCaseDebug: data.debug ?? null,
+        })
         await get().refreshCases()
       },
 
@@ -1135,10 +1184,19 @@ export const useStore = create<Store>()(
       },
 
       deleteCase: async (path) => {
-        await api.deleteCase(path)
-        if (get().currentCasePath === path) {
+        const normalizedPath = normalizeRelPath(path)
+        await api.deleteCase(normalizedPath)
+        const currentCasePath = get().currentCasePath
+        if (
+          currentCasePath === normalizedPath ||
+          currentCasePath?.startsWith(`${normalizedPath}/`)
+        ) {
           lastSavedCaseFingerprint = null
-          set({ currentCasePath: null, currentCaseMeta: null })
+          set({
+            currentCasePath: null,
+            currentCaseMeta: null,
+            currentCaseDebug: null,
+          })
         }
         await get().refreshCases()
       },
@@ -1166,6 +1224,7 @@ useStore.subscribe((state, prev) => {
     state.messages === prev.messages &&
     state.currentCasePath === prev.currentCasePath &&
     state.currentCaseMeta === prev.currentCaseMeta &&
+    state.currentCaseDebug === prev.currentCaseDebug &&
     state.lastUsage === prev.lastUsage &&
     state.lastLatency === prev.lastLatency &&
     state.lastStopReason === prev.lastStopReason &&
@@ -1194,6 +1253,7 @@ useStore.subscribe((state, prev) => {
         mcpServers: state.mcpServers,
         messages: state.messages,
         currentCasePath: state.currentCasePath,
+        currentCaseDebug: state.currentCaseDebug,
         lastUsage: state.lastUsage,
         lastLatency: state.lastLatency,
         lastStopReason: state.lastStopReason,
@@ -1202,6 +1262,12 @@ useStore.subscribe((state, prev) => {
   }, 400)
 
   if (!state.currentCasePath) {
+    if (caseSaveTimer) clearTimeout(caseSaveTimer)
+    caseSaveTimer = null
+    return
+  }
+
+  if (isLiveDebugCaseState(state)) {
     if (caseSaveTimer) clearTimeout(caseSaveTimer)
     caseSaveTimer = null
     return

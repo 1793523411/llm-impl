@@ -73,6 +73,8 @@ export async function writeCase(rel: string, data: unknown): Promise<void> {
 export async function createCaseDir(rel: string): Promise<void> {
   const abs = safeJoin(rel)
   if (!abs) throw new Error('invalid path')
+  const existing = await fs.stat(abs).catch(() => null)
+  if (existing) throw new Error('target already exists')
   await fs.mkdir(abs, { recursive: true })
 }
 
@@ -105,11 +107,17 @@ export async function moveCaseEntry(fromRel: string, toRel: string): Promise<boo
 
 export async function deleteCase(rel: string): Promise<boolean> {
   const abs = safeJoin(rel)
-  if (!abs) return false
-  try {
+  if (!abs || abs === ROOT) return false
+  const stat = await fs.stat(abs).catch(() => null)
+  if (!stat) return false
+  if (stat.isDirectory()) {
+    await fs.rm(abs, { recursive: true })
+    return true
+  }
+  if (stat.isFile()) {
+    if (!abs.endsWith('.json')) throw new Error('only JSON case files can be deleted')
     await fs.unlink(abs)
     return true
-  } catch {
-    return false
   }
+  return false
 }

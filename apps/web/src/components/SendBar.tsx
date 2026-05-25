@@ -8,7 +8,14 @@ export function SendBar() {
   const send = useStore((s) => s.send)
   const messages = useStore((s) => s.messages)
   const currentCasePath = useStore((s) => s.currentCasePath)
+  const config = useStore((s) => s.config)
+  const providers = useStore((s) => s.providers)
   const [comparing, setComparing] = useState(false)
+  const providerConfigured = providers.some((provider) => provider.key === config.provider)
+  const missingProviderHint =
+    config.provider && !providerConfigured
+      ? `Provider "${config.provider}" is from this case only. Add it to config/providers.json to Send/Test/Compare.`
+      : null
 
   const last = messages[messages.length - 1]
   const lastIsAssistantWithToolUse =
@@ -33,6 +40,7 @@ export function SendBar() {
       <button
         className="btn-primary"
         disabled={status === 'running'}
+        title={missingProviderHint ?? undefined}
         onClick={() => send()}
       >
         {status === 'running' ? 'running…' : sendLabel}
@@ -43,6 +51,11 @@ export function SendBar() {
       <span className="text-xs text-zinc-500">
         {messages.length} message{messages.length === 1 ? '' : 's'}
       </span>
+      {missingProviderHint && (
+        <span className="text-xs text-amber-400 flex-1 truncate">
+          {missingProviderHint}
+        </span>
+      )}
       {error && (
         <span className="text-xs text-red-400 flex-1 truncate">⚠ {error}</span>
       )}

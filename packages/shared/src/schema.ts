@@ -193,6 +193,8 @@ export type ProviderTestResponse = z.infer<typeof ProviderTestResponse>
 export const Config = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
+  api: ApiProtocol.optional(),
+  baseUrl: z.string().optional(),
   temperature: z.number().min(0).max(2).optional(),
   max_tokens: z.number().int().positive().optional(),
   stream: z.boolean().default(false),
@@ -345,12 +347,68 @@ export const McpCallToolResponse = ExecToolResponse.extend({
 })
 export type McpCallToolResponse = z.infer<typeof McpCallToolResponse>
 
+export const DebugConstraintSnapshot = z
+  .object({
+    kind: z
+      .enum(['plan', 'policy', 'approval', 'budget', 'guardrail', 'custom'])
+      .default('custom'),
+    name: z.string().optional(),
+    status: z
+      .enum(['ok', 'blocked', 'violated', 'waiting', 'completed'])
+      .default('ok'),
+    currentStep: z.string().optional(),
+    progressText: z.string().optional(),
+    allowedTools: z.array(z.string()).optional(),
+    requiredTools: z.array(z.string()).optional(),
+    forbiddenTools: z.array(z.string()).optional(),
+    violation: z
+      .object({
+        message: z.string(),
+        retryable: z.boolean().optional(),
+      })
+      .optional(),
+    raw: z.unknown().optional(),
+  })
+  .passthrough()
+export type DebugConstraintSnapshot = z.infer<typeof DebugConstraintSnapshot>
+
+export const LiveDebugResumeAction = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('continue'),
+  }),
+  z.object({
+    action: z.literal('override_input'),
+    input: z.record(z.unknown()),
+  }),
+  z.object({
+    action: z.literal('mock_result'),
+    result: z.unknown(),
+    isError: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal('abort'),
+    reason: z.string().optional(),
+  }),
+])
+export type LiveDebugResumeAction = z.infer<typeof LiveDebugResumeAction>
+
+export const DebugCaseRouting = z
+  .object({
+    group: z.union([z.string(), z.array(z.string())]).optional(),
+    name: z.string().optional(),
+  })
+  .passthrough()
+export type DebugCaseRouting = z.infer<typeof DebugCaseRouting>
+
 export const Case = z.object({
   meta: z
     .object({
       name: z.string().optional(),
       tags: z.array(z.string()).optional(),
       updatedAt: z.string().optional(),
+      source: z.string().optional(),
+      sessionId: z.string().optional(),
+      runId: z.string().optional(),
     })
     .optional(),
   config: Config,
@@ -369,5 +427,162 @@ export const Case = z.object({
       stop_reason: z.string().nullable().optional(),
     })
     .optional(),
+  debug: z
+    .object({
+      source: z.record(z.unknown()).optional(),
+      events: z.array(z.unknown()).optional(),
+      constraints: z.array(DebugConstraintSnapshot).optional(),
+      metadata: z.record(z.unknown()).optional(),
+      live: z
+        .object({
+          status: z.enum(['paused', 'continued', 'timeout', 'abandoned', 'aborted']).optional(),
+          pauseId: z.string().optional(),
+          casePath: z.string().optional(),
+          toolCallId: z.string().optional(),
+          toolName: z.string().optional(),
+          plan: z.record(z.unknown()).optional(),
+          constraints: z.array(DebugConstraintSnapshot).optional(),
+          resume: LiveDebugResumeAction.optional(),
+        })
+        .optional(),
+    })
+    .optional(),
 })
 export type Case = z.infer<typeof Case>
+
+export const DebugRunSource = z.object({
+  project: z.string().min(1),
+  sessionId: z.string().optional(),
+  runId: z.string().optional(),
+  userId: z.string().optional(),
+})
+export type DebugRunSource = z.infer<typeof DebugRunSource>
+
+export const DebugRunConfig = z.object({
+  provider: z.string().min(1).optional(),
+  model: z.string().min(1),
+  api: ApiProtocol.optional(),
+  baseUrl: z.string().optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  max_tokens: z.number().int().positive().optional(),
+})
+export type DebugRunConfig = z.infer<typeof DebugRunConfig>
+
+export const DebugRunLastRun = z.object({
+  timestamp: z.string().optional(),
+  usage: Usage.optional(),
+  latency_ms: z.number().optional(),
+  stop_reason: z.string().nullable().optional(),
+})
+export type DebugRunLastRun = z.infer<typeof DebugRunLastRun>
+
+export const DebugRunRequest = z.object({
+  source: DebugRunSource,
+  caseRouting: DebugCaseRouting.optional(),
+  config: DebugRunConfig,
+  system: z.string().optional(),
+  tools: z.array(z.unknown()).default([]),
+  messages: z.array(z.unknown()).default([]),
+  events: z.array(z.unknown()).default([]),
+  constraints: z.array(DebugConstraintSnapshot).optional(),
+  metadata: z.record(z.unknown()).optional(),
+  lastRun: DebugRunLastRun.optional(),
+})
+export type DebugRunRequest = z.infer<typeof DebugRunRequest>
+
+export const DebugRunResponse = z.object({
+  ok: z.boolean(),
+  id: z.string(),
+  casePath: z.string().optional(),
+  debugUrl: z.string(),
+  skipped: z.boolean().optional(),
+  reason: z.string().optional(),
+})
+export type DebugRunResponse = z.infer<typeof DebugRunResponse>
+
+export const LiveDebugSettings = z.object({
+  enabled: z.boolean().default(false),
+  pauseAll: z.boolean().default(false),
+  toolNames: z.array(z.string()).default([]),
+})
+export type LiveDebugSettings = z.infer<typeof LiveDebugSettings>
+
+export const LiveDebugToolCall = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  input: z.record(z.unknown()).default({}),
+})
+export type LiveDebugToolCall = z.infer<typeof LiveDebugToolCall>
+
+export const LiveDebugPauseRequest = z.object({
+  source: DebugRunSource,
+  caseRouting: DebugCaseRouting.optional(),
+  config: DebugRunConfig.optional(),
+  toolCall: LiveDebugToolCall,
+  messages: z.array(z.unknown()).default([]),
+  tools: z.array(z.unknown()).default([]),
+  events: z.array(z.unknown()).default([]),
+  constraints: z.array(DebugConstraintSnapshot).optional(),
+  plan: z
+    .object({
+      progress: z.string().optional(),
+      currentStep: z.string().optional(),
+    })
+    .optional(),
+})
+export type LiveDebugPauseRequest = z.infer<typeof LiveDebugPauseRequest>
+
+export const LiveDebugResumeRequest = z.preprocess((value) => {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>
+    if (!record.action) return { ...record, action: 'continue' }
+  }
+  return value
+}, LiveDebugResumeAction)
+export type LiveDebugResumeRequest = z.infer<typeof LiveDebugResumeRequest>
+
+export const LiveDebugPausePoint = z.object({
+  id: z.string(),
+  status: z.enum(['paused', 'continued', 'timeout', 'abandoned', 'aborted']),
+  source: DebugRunSource,
+  toolCall: LiveDebugToolCall,
+  casePath: z.string().optional(),
+  createdAt: z.string(),
+  resumedAt: z.string().optional(),
+  plan: z
+    .object({
+      progress: z.string().optional(),
+      currentStep: z.string().optional(),
+    })
+    .optional(),
+  constraints: z.array(DebugConstraintSnapshot).optional(),
+  resume: LiveDebugResumeAction.optional(),
+  messagesCount: z.number(),
+  toolsCount: z.number(),
+  eventsCount: z.number(),
+})
+export type LiveDebugPausePoint = z.infer<typeof LiveDebugPausePoint>
+
+export const LiveDebugStateResponse = z.object({
+  settings: LiveDebugSettings,
+  pausePoints: z.array(LiveDebugPausePoint),
+})
+export type LiveDebugStateResponse = z.infer<typeof LiveDebugStateResponse>
+
+export const LiveDebugToolCallResponse = z.object({
+  paused: z.boolean(),
+  action: z.literal('continue').optional(),
+  pauseId: z.string().optional(),
+  casePath: z.string().optional(),
+})
+export type LiveDebugToolCallResponse = z.infer<typeof LiveDebugToolCallResponse>
+
+export const LiveDebugWaitResponse = z.object({
+  action: z.enum(['continue', 'override_input', 'mock_result', 'abort']),
+  status: z.enum(['continued', 'timeout', 'abandoned', 'aborted']),
+  input: z.record(z.unknown()).optional(),
+  result: z.unknown().optional(),
+  isError: z.boolean().optional(),
+  reason: z.string().optional(),
+})
+export type LiveDebugWaitResponse = z.infer<typeof LiveDebugWaitResponse>

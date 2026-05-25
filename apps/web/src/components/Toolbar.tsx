@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
-import { AlertDialog, ConfirmDialog } from './ui/AppDialog'
+import * as api from '../api'
+import { LiveDebugPanel } from './LiveDebugPanel'
+import { AlertDialog, AppDialog, ConfirmDialog } from './ui/AppDialog'
 
 type Theme = 'dark' | 'light'
 
@@ -14,6 +16,8 @@ export function Toolbar() {
   const importJson = useStore((s) => s.importJson)
   const reset = useStore((s) => s.reset)
   const currentCasePath = useStore((s) => s.currentCasePath)
+  const refreshCases = useStore((s) => s.refreshCases)
+  const loadCase = useStore((s) => s.loadCase)
 
   const [importing, setImporting] = useState(false)
   const [importText, setImportText] = useState('')
@@ -21,6 +25,9 @@ export function Toolbar() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false)
+  const [liveDebugOpen, setLiveDebugOpen] = useState(false)
+  const [liveDebugEnabled, setLiveDebugEnabled] = useState(false)
+  const [liveDebugPausedCount, setLiveDebugPausedCount] = useState(0)
 
   useEffect(() => {
     document.documentElement.classList.toggle('light', theme === 'light')
@@ -28,6 +35,39 @@ export function Toolbar() {
     document.documentElement.style.colorScheme = theme
     localStorage.setItem('llm-impl-theme', theme)
   }, [theme])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadLiveDebugState = async () => {
+      try {
+        const state = await api.getLiveDebugState()
+        if (cancelled) return
+        setLiveDebugEnabled(state.settings.enabled)
+        setLiveDebugPausedCount(
+          state.pausePoints.filter((point) => point.status === 'paused').length,
+        )
+        if (state.pausePoints.some((point) => point.casePath)) {
+          await refreshCases()
+        }
+        const activeLiveCase = state.pausePoints.find(
+          (point) => point.casePath && point.casePath === useStore.getState().currentCasePath,
+        )
+        if (activeLiveCase?.casePath) {
+          await loadCase(activeLiveCase.casePath)
+        }
+      } catch {
+        if (cancelled) return
+        setLiveDebugEnabled(false)
+        setLiveDebugPausedCount(0)
+      }
+    }
+    loadLiveDebugState()
+    const timer = window.setInterval(loadLiveDebugState, 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [loadCase, refreshCases])
 
   const handleCopy = async () => {
     try {
@@ -56,6 +96,18 @@ export function Toolbar() {
         {currentCasePath ? `· ${currentCasePath}` : '· (no case selected)'}
       </span>
       {copyMsg && <span className="text-xs text-emerald-400">{copyMsg}</span>}
+      <button
+        className={liveDebugPausedCount > 0 ? 'btn-primary' : 'btn'}
+        onClick={() => setLiveDebugOpen(true)}
+        title="Open global live debugger"
+      >
+        Live Debug
+        {liveDebugPausedCount > 0
+          ? ` · ${liveDebugPausedCount} paused`
+          : liveDebugEnabled
+            ? ' · on'
+            : ''}
+      </button>
       <button
         className="btn theme-toggle"
         onClick={() => setTheme((value) => (value === 'dark' ? 'light' : 'dark'))}
@@ -98,6 +150,16 @@ export function Toolbar() {
         message={errorMessage ?? ''}
         onClose={() => setErrorMessage(null)}
       />
+
+      <AppDialog
+        open={liveDebugOpen}
+        title="Global Live Debugger"
+        description="Runtime breakpoints apply globally to connected agent sessions, not to the selected case."
+        onClose={() => setLiveDebugOpen(false)}
+        actions={[{ label: 'Close', onClick: () => setLiveDebugOpen(false) }]}
+      >
+        <LiveDebugPanel />
+      </AppDialog>
 
       {importing && (
         <div

@@ -1,9 +1,10 @@
-import { useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useState, type DragEvent } from 'react'
 import { useStore } from '../store'
 import type { CaseEntry } from '../api'
 import { AlertDialog, ConfirmDialog, PromptDialog } from './ui/AppDialog'
 
 const CASE_DRAG_TYPE = 'application/x-llm-case-entry'
+const CASE_TREE_COLLAPSED_STORAGE_KEY = 'llm-impl-case-tree-collapsed-dirs'
 
 type DragPayload = {
   path: string
@@ -13,7 +14,7 @@ type DragPayload = {
 type CaseTreeDialog =
   | { kind: 'new-case'; dir: string; value: string; error?: string }
   | { kind: 'new-folder'; dir: string; value: string; error?: string }
-  | { kind: 'delete-case'; path: string }
+  | { kind: 'delete-entry'; path: string; entryType: CaseEntry['type'] }
   | { kind: 'alert'; title: string; message: string }
 
 const basename = (entryPath: string): string => entryPath.split('/').pop() ?? entryPath
@@ -37,6 +38,45 @@ const joinPath = (...parts: string[]): string =>
 
 const displayDir = (dir: string): string => (dir ? `/${dir}` : '/')
 
+function readCollapsedDirs(): string[] {
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(CASE_TREE_COLLAPSED_STORAGE_KEY) ?? '[]',
+    ) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((value): value is string => typeof value === 'string')
+  } catch {
+    return []
+  }
+}
+
+function writeCollapsedDirs(paths: string[]): void {
+  try {
+    localStorage.setItem(CASE_TREE_COLLAPSED_STORAGE_KEY, JSON.stringify(paths))
+  } catch {
+    // Ignore storage failures; the tree still works for the current session.
+  }
+}
+
+function collectDirPaths(entries: CaseEntry[]): Set<string> {
+  const paths = new Set<string>()
+  const visit = (entry: CaseEntry) => {
+    if (entry.type !== 'dir') return
+    paths.add(entry.path)
+    entry.children?.forEach(visit)
+  }
+  entries.forEach(visit)
+  return paths
+}
+
+function entryPathExists(entries: CaseEntry[], targetPath: string): boolean {
+  return entries.some(
+    (entry) =>
+      entry.path === targetPath ||
+      (entry.children ? entryPathExists(entry.children, targetPath) : false),
+  )
+}
+
 function readDragPayload(event: DragEvent): DragPayload | null {
   const raw = event.dataTransfer.getData(CASE_DRAG_TYPE)
   if (!raw) return null
@@ -53,6 +93,10 @@ function targetPathFor(payload: DragPayload, targetDir: string): string {
   return joinPath(targetDir, basename(payload.path))
 }
 
+function casePathForInput(dir: string, value: string): string {
+  return joinPath(dir, `${value.replace(/\.json$/i, '')}.json`)
+}
+
 function TreeNode({
   entry,
   depth,
@@ -63,7 +107,9 @@ function TreeNode({
   onDropToDir,
   onNewCase,
   onNewFolder,
-  onDeleteCase,
+  onDeleteEntry,
+  isCollapsed,
+  onToggleDir,
 }: {
   entry: CaseEntry
   depth: number
@@ -74,9 +120,10 @@ function TreeNode({
   onDropToDir: (dir: string, event: DragEvent) => void
   onNewCase: (dir: string) => void
   onNewFolder: (dir: string) => void
-  onDeleteCase: (path: string) => void
+  onDeleteEntry: (path: string, entryType: CaseEntry['type']) => void
+  isCollapsed: (dir: string) => boolean
+  onToggleDir: (dir: string) => void
 }) {
-  const [open, setOpen] = useState(true)
   const loadCase = useStore((s) => s.loadCase)
   const currentCasePath = useStore((s) => s.currentCasePath)
   const isActive = currentCasePath === entry.path
@@ -93,6 +140,7 @@ function TreeNode({
 
   if (entry.type === 'dir') {
     const isSelected = selectedDir === entry.path
+    const open = !isCollapsed(entry.path)
     return (
       <div>
         <div
@@ -114,7 +162,7 @@ function TreeNode({
             title={open ? 'Collapse folder' : 'Expand folder'}
             onClick={(event) => {
               event.stopPropagation()
-              setOpen(!open)
+              onToggleDir(entry.path)
             }}
           >
             {open ? '▾' : '▸'}
@@ -140,6 +188,16 @@ function TreeNode({
           >
             Dir
           </button>
+          <button
+            className="case-tree-delete"
+            title="Delete folder"
+            onClick={(event) => {
+              event.stopPropagation()
+              onDeleteEntry(entry.path, entry.type)
+            }}
+          >
+            ✕
+          </button>
         </div>
         {open &&
           entry.children?.map((child) => (
@@ -154,7 +212,9 @@ function TreeNode({
               onDropToDir={onDropToDir}
               onNewCase={onNewCase}
               onNewFolder={onNewFolder}
-              onDeleteCase={onDeleteCase}
+              onDeleteEntry={onDeleteEntry}
+              isCollapsed={isCollapsed}
+              onToggleDir={onToggleDir}
             />
           ))}
       </div>
@@ -177,7 +237,7 @@ function TreeNode({
         title="Delete"
         onClick={(e) => {
           e.stopPropagation()
-          onDeleteCase(entry.path)
+          onDeleteEntry(entry.path, entry.type)
         }}
       >
         ✕
@@ -196,9 +256,32 @@ export function CaseTree() {
   const [selectedDir, setSelectedDir] = useState('')
   const [dragOverDir, setDragOverDir] = useState<string | null>(null)
   const [dialog, setDialog] = useState<CaseTreeDialog | null>(null)
+  const [collapsedDirs, setCollapsedDirs] = useState<string[]>(readCollapsedDirs)
+  const collapsedDirSet = useMemo(() => new Set(collapsedDirs), [collapsedDirs])
+
+  useEffect(() => {
+    writeCollapsedDirs(collapsedDirs)
+  }, [collapsedDirs])
+
+  useEffect(() => {
+    if (cases.length === 0) return
+    const dirPaths = collectDirPaths(cases)
+    setCollapsedDirs((paths) => {
+      const next = paths.filter((path) => dirPaths.has(path))
+      return next.length === paths.length ? paths : next
+    })
+  }, [cases])
 
   const showAlert = (title: string, message: string) =>
     setDialog({ kind: 'alert', title, message })
+
+  const toggleDir = (dir: string) => {
+    setCollapsedDirs((paths) =>
+      paths.includes(dir)
+        ? paths.filter((path) => path !== dir)
+        : [...paths, dir],
+    )
+  }
 
   const handleNewCase = (dir = selectedDir) => {
     setDialog({ kind: 'new-case', dir, value: '' })
@@ -211,6 +294,13 @@ export function CaseTree() {
     if (input.trim() && !name) {
       setDialog({ ...dialog, error: 'Invalid case name' })
       return
+    }
+    if (name) {
+      const nextPath = casePathForInput(dialog.dir, name)
+      if (entryPathExists(cases, nextPath)) {
+        setDialog({ ...dialog, error: `Already exists: ${nextPath}` })
+        return
+      }
     }
     setDialog(null)
     newCase(dialog.dir, name || undefined).catch((e) =>
@@ -231,19 +321,33 @@ export function CaseTree() {
       return
     }
     const nextDir = joinPath(dialog.dir, child)
+    if (entryPathExists(cases, nextDir)) {
+      setDialog({ ...dialog, error: `Already exists: ${nextDir}` })
+      return
+    }
     setDialog(null)
     createCaseDir(nextDir)
-      .then(() => setSelectedDir(nextDir))
+      .then(() => {
+        setCollapsedDirs((paths) => paths.filter((path) => path !== nextDir))
+        setSelectedDir(nextDir)
+      })
       .catch((e) => showAlert('Folder Create Failed', (e as Error).message))
   }
 
   const confirmDeleteCase = () => {
-    if (dialog?.kind !== 'delete-case') return
+    if (dialog?.kind !== 'delete-entry') return
     const target = dialog.path
     setDialog(null)
-    deleteCase(target).catch((e) =>
-      showAlert('Delete Failed', (e as Error).message),
-    )
+    deleteCase(target)
+      .then(() => {
+        setCollapsedDirs((paths) =>
+          paths.filter((path) => path !== target && !path.startsWith(`${target}/`)),
+        )
+        if (selectedDir === target || selectedDir.startsWith(`${target}/`)) {
+          setSelectedDir('')
+        }
+      })
+      .catch((e) => showAlert('Delete Failed', (e as Error).message))
   }
 
   const handleDropToDir = (targetDir: string, event: DragEvent) => {
@@ -263,9 +367,33 @@ export function CaseTree() {
 
     const targetPath = targetPathFor(payload, targetDir)
     if (!targetPath || targetPath === payload.path) return
+    if (entryPathExists(cases, targetPath)) {
+      showAlert('Move Blocked', `Already exists: ${targetPath}`)
+      return
+    }
 
     moveCaseEntry(payload.path, targetPath)
       .then(() => {
+        setCollapsedDirs((paths) => {
+          if (
+            !paths.some(
+              (path) => path === payload.path || path.startsWith(`${payload.path}/`),
+            )
+          ) {
+            return paths
+          }
+          return Array.from(
+            new Set(
+              paths.map((path) =>
+                path === payload.path
+                  ? targetPath
+                  : path.startsWith(`${payload.path}/`)
+                    ? `${targetPath}${path.slice(payload.path.length)}`
+                    : path,
+              ),
+            ),
+          )
+        })
         if (
           selectedDir === payload.path ||
           selectedDir.startsWith(`${payload.path}/`)
@@ -343,7 +471,11 @@ export function CaseTree() {
             onDropToDir={handleDropToDir}
             onNewCase={handleNewCase}
             onNewFolder={handleNewFolder}
-            onDeleteCase={(path) => setDialog({ kind: 'delete-case', path })}
+            onDeleteEntry={(path, entryType) =>
+              setDialog({ kind: 'delete-entry', path, entryType })
+            }
+            isCollapsed={(dir) => collapsedDirSet.has(dir)}
+            onToggleDir={toggleDir}
           />
         ))}
       </div>
@@ -378,11 +510,15 @@ export function CaseTree() {
         />
       )}
 
-      {dialog?.kind === 'delete-case' && (
+      {dialog?.kind === 'delete-entry' && (
         <ConfirmDialog
           open
-          title="Delete Case"
-          message={`Delete ${dialog.path}?`}
+          title={dialog.entryType === 'dir' ? 'Delete Folder' : 'Delete Case'}
+          message={
+            dialog.entryType === 'dir'
+              ? `Delete ${dialog.path} and all cases inside it?`
+              : `Delete ${dialog.path}?`
+          }
           confirmLabel="Delete"
           danger
           onConfirm={confirmDeleteCase}
