@@ -47,6 +47,21 @@ async function walk(dir: string, rel: string): Promise<CaseEntry[]> {
   return out
 }
 
+async function pruneEmptyParents(abs: string): Promise<void> {
+  let dir = path.dirname(abs)
+  while (dir !== ROOT && dir.startsWith(ROOT + path.sep)) {
+    let entries: string[]
+    try {
+      entries = await fs.readdir(dir)
+    } catch {
+      return
+    }
+    if (entries.some((name) => !name.startsWith('.'))) return
+    await fs.rmdir(dir).catch(() => undefined)
+    dir = path.dirname(dir)
+  }
+}
+
 export async function listCases(): Promise<CaseEntry[]> {
   await fs.mkdir(ROOT, { recursive: true })
   return walk(ROOT, '')
@@ -102,6 +117,7 @@ export async function moveCaseEntry(fromRel: string, toRel: string): Promise<boo
 
   await fs.mkdir(path.dirname(toAbs), { recursive: true })
   await fs.rename(fromAbs, toAbs)
+  await pruneEmptyParents(fromAbs)
   return true
 }
 
@@ -112,11 +128,13 @@ export async function deleteCase(rel: string): Promise<boolean> {
   if (!stat) return false
   if (stat.isDirectory()) {
     await fs.rm(abs, { recursive: true })
+    await pruneEmptyParents(abs)
     return true
   }
   if (stat.isFile()) {
     if (!abs.endsWith('.json')) throw new Error('only JSON case files can be deleted')
     await fs.unlink(abs)
+    await pruneEmptyParents(abs)
     return true
   }
   return false

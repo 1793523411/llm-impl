@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type {
+  DebugRunSource,
   DebugConstraintSnapshot,
   DebugRunRequest,
   LiveDebugPausePoint,
@@ -10,7 +11,7 @@ import type {
   LiveDebugToolCallResponse,
   LiveDebugWaitResponse,
 } from '@llm-impl/shared'
-import { writeCase } from './cases'
+import { deleteCase, listCases, readCase, writeCase, type CaseEntry } from './cases'
 import { buildDebugRunCase } from './debug-runs'
 
 type StoredPausePoint = LiveDebugPausePoint & {
@@ -54,6 +55,51 @@ function slug(value: string | undefined, fallback: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 80)
   return cleaned || fallback
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+function liveSourceKey(source: DebugRunSource): string {
+  return [
+    slug(source.project, 'live'),
+    slug(source.sessionId ?? source.runId, 'session'),
+  ].join('/')
+}
+
+function liveSourceKeyFromCase(data: unknown): string | undefined {
+  const record = asRecord(data)
+  const meta = asRecord(record?.meta)
+  const debug = asRecord(record?.debug)
+  const source = asRecord(debug?.source)
+  const project = asString(source?.project) ?? asString(meta?.source)
+  const sessionId = asString(source?.sessionId) ?? asString(meta?.sessionId)
+  const runId = asString(source?.runId) ?? asString(meta?.runId)
+  if (!project || (!sessionId && !runId)) return undefined
+  return [slug(project, 'live'), slug(sessionId ?? runId, 'session')].join('/')
+}
+
+function liveMetadata(data: unknown): Record<string, unknown> | null {
+  const record = asRecord(data)
+  const debug = asRecord(record?.debug)
+  return asRecord(debug?.live)
+}
+
+function liveUpdatedAt(data: unknown): string | undefined {
+  const record = asRecord(data)
+  const meta = asRecord(record?.meta)
+  return asString(meta?.updatedAt)
+}
+
+function flattenCases(entries: CaseEntry[]): CaseEntry[] {
+  return entries.flatMap((entry) => [entry, ...(entry.children ? flattenCases(entry.children) : [])])
 }
 
 function routeGroupSegments(route: LiveDebugPauseRequest['caseRouting']): string[] {
@@ -209,6 +255,39 @@ async function writeLiveCase(point: StoredPausePoint): Promise<void> {
   await writeCase(point.casePath, caseData)
 }
 
+async function cleanupStaleLiveCases(point: StoredPausePoint): Promise<void> {
+  if (!point.casePath) return
+
+  const pointSourceKey = liveSourceKey(point.source)
+  const pointUpdatedAt = point.resumedAt ?? point.createdAt
+  const entries = flattenCases(await listCases())
+  const candidates = entries.filter(
+    (entry) =>
+      entry.type === 'file' &&
+      entry.path.startsWith('live/') &&
+      entry.path.endsWith('.json') &&
+      entry.path !== point.casePath,
+  )
+
+  await Promise.allSettled(
+    candidates.map(async (entry) => {
+      const data = await readCase(entry.path)
+      if (liveSourceKeyFromCase(data) !== pointSourceKey) return
+
+      const updatedAt = liveUpdatedAt(data)
+      if (updatedAt && updatedAt.localeCompare(pointUpdatedAt) > 0) return
+
+      const live = liveMetadata(data)
+      const status = asString(live?.status)
+      const pauseId = asString(live?.pauseId)
+      const knownPoint = pauseId ? pausePoints.get(pauseId) : undefined
+      if (status === 'paused' && knownPoint?.status === 'paused') return
+
+      await deleteCase(entry.path)
+    }),
+  )
+}
+
 async function settlePause(
   pauseId: string,
   response: LiveDebugWaitResponse,
@@ -223,6 +302,7 @@ async function settlePause(
   }
 
   await writeLiveCase(point).catch(() => undefined)
+  await cleanupStaleLiveCases(point).catch(() => undefined)
 
   const waiter = waiters.get(pauseId)
   if (waiter) {
@@ -259,16 +339,29 @@ function prunePausePoints(): void {
 
 async function syncLatestLiveCases(): Promise<void> {
   const latestByCasePath = new Map<string, StoredPausePoint>()
+  const latestBySource = new Map<string, StoredPausePoint>()
   for (const point of pausePoints.values()) {
     if (!point.casePath) continue
     const existing = latestByCasePath.get(point.casePath)
     if (!existing || point.createdAt.localeCompare(existing.createdAt) > 0) {
       latestByCasePath.set(point.casePath, point)
     }
+
+    const sourceKey = liveSourceKey(point.source)
+    const existingSourcePoint = latestBySource.get(sourceKey)
+    if (!existingSourcePoint || point.createdAt.localeCompare(existingSourcePoint.createdAt) > 0) {
+      latestBySource.set(sourceKey, point)
+    }
   }
 
+  const pointsToWrite = Array.from(latestByCasePath.values()).filter((point) => {
+    const latestSourcePoint = latestBySource.get(liveSourceKey(point.source))
+    return point.status === 'paused' || latestSourcePoint === point
+  })
+
+  await Promise.allSettled(pointsToWrite.map((point) => writeLiveCase(point)))
   await Promise.allSettled(
-    Array.from(latestByCasePath.values()).map((point) => writeLiveCase(point)),
+    Array.from(latestBySource.values()).map((point) => cleanupStaleLiveCases(point)),
   )
 }
 
@@ -319,6 +412,7 @@ export async function registerLiveDebugToolCall(
   }
   pausePoints.set(pauseId, point)
   await writeLiveCase(point)
+  await cleanupStaleLiveCases(point).catch(() => undefined)
 
   return { paused: true, pauseId, casePath }
 }
@@ -344,6 +438,7 @@ export async function syncLiveDebugCaseFromRun(input: DebugRunRequest): Promise<
   point.eventsCount = input.events.length
 
   await writeLiveCase(point)
+  await cleanupStaleLiveCases(point).catch(() => undefined)
 }
 
 export function waitForLiveDebugPause(
