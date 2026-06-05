@@ -6,6 +6,8 @@ export function SendBar() {
   const status = useStore((s) => s.status)
   const error = useStore((s) => s.error)
   const send = useStore((s) => s.send)
+  const autoRun = useStore((s) => s.autoRun)
+  const autoRunActive = useStore((s) => s.autoRunActive)
   const messages = useStore((s) => s.messages)
   const currentCasePath = useStore((s) => s.currentCasePath)
   const config = useStore((s) => s.config)
@@ -23,7 +25,7 @@ export function SendBar() {
     last.content.some((b) => b.type === 'tool_use')
   const lastIsUserWithEmptyToolResult =
     last?.role === 'user' &&
-    last.content.some((b) => b.type === 'tool_result' && !b.content)
+    last.content.some((b) => b.type === 'tool_result' && !b.content.trim())
 
   const sendLabel = lastIsAssistantWithToolUse
     ? 'Send (will fail — fill tool_results first)'
@@ -39,11 +41,19 @@ export function SendBar() {
     <div className="border-t border-zinc-800 bg-zinc-950 px-3 py-2 flex items-center gap-3">
       <button
         className="btn-primary"
-        disabled={status === 'running'}
+        disabled={status === 'running' || autoRunActive}
         title={missingProviderHint ?? undefined}
-        onClick={() => send()}
+        onClick={() => void send()}
       >
         {status === 'running' ? 'running…' : sendLabel}
+      </button>
+      <button
+        className="btn"
+        disabled={status === 'running' || autoRunActive}
+        title="Send, execute runnable tool results, and continue until the assistant finishes"
+        onClick={() => void autoRun()}
+      >
+        {autoRunActive ? 'auto running…' : 'Auto Run ▶'}
       </button>
       <button className="btn" onClick={() => setComparing(true)} title={compareTitle}>
         ⇆ {compareLabel}

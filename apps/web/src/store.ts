@@ -39,12 +39,21 @@ const newToolUseId = (): string =>
   `toolu_${Math.random().toString(36).slice(2, 10)}`
 
 const STREAM_DRAFT_FLUSH_MS = 50
+const AUTO_RUN_MAX_STEPS = 50
 
 type CaseMeta = Case['meta']
 type CaseDebug = Case['debug']
 type SkillPatch = Partial<SkillConfig>
 type McpServerPatch = Partial<McpServerConfig>
 type McpToolPatch = Partial<McpToolConfig>
+type ToolUseBlock = Extract<AssistantContentBlock, { type: 'tool_use' }>
+type ToolResultBlock = Extract<UserContentBlock, { type: 'tool_result' }>
+type ToolResultLocation = {
+  msgIdx: number
+  blockIdx: number
+  toolUseId: string
+  toolName?: string
+}
 
 interface Store {
   // case state
@@ -64,6 +73,7 @@ interface Store {
   lastLatency: number | null
   lastStopReason: string | null
   runningToolResults: Record<string, true>
+  autoRunActive: boolean
 
   // providers
   providers: ProviderInfo[]
@@ -110,6 +120,7 @@ interface Store {
   ) => void
 
   send: () => Promise<void>
+  autoRun: () => Promise<void>
   reset: () => void
   newCase: (dir?: string, name?: string) => Promise<void>
 
@@ -405,6 +416,70 @@ function buildEffectiveSystemFromState(state: Pick<Store, 'system' | 'skills'>):
   return [state.system.trim(), catalog].filter(Boolean).join('\n\n')
 }
 
+function findToolUseById(
+  messages: Message[],
+  toolUseId: string,
+): ToolUseBlock | undefined {
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue
+    const block = message.content.find(
+      (item): item is ToolUseBlock =>
+        item.type === 'tool_use' && item.id === toolUseId,
+    )
+    if (block) return block
+  }
+  return undefined
+}
+
+function findEmptyToolResults(messages: Message[]): ToolResultLocation[] {
+  const locations: ToolResultLocation[] = []
+
+  messages.forEach((message, msgIdx) => {
+    if (message.role !== 'user') return
+    message.content.forEach((block, blockIdx) => {
+      if (block.type !== 'tool_result' || block.content.trim()) return
+      const toolUse = findToolUseById(messages, block.tool_use_id)
+      locations.push({
+        msgIdx,
+        blockIdx,
+        toolUseId: block.tool_use_id,
+        toolName: toolUse?.name,
+      })
+    })
+  })
+
+  return locations
+}
+
+function appendToolResultStubsAfterLastAssistant(
+  messages: Message[],
+): Message[] | null {
+  const last = messages[messages.length - 1]
+  if (!last || last.role !== 'assistant') return null
+  const toolUses = last.content.filter(
+    (block): block is ToolUseBlock => block.type === 'tool_use',
+  )
+  if (toolUses.length === 0) return null
+
+  return [
+    ...messages,
+    {
+      role: 'user',
+      content: toolUses.map((toolUse): ToolResultBlock => ({
+        type: 'tool_result',
+        tool_use_id: toolUse.id,
+        content: '',
+      })),
+    },
+  ]
+}
+
+function describeToolResultLocation(location: ToolResultLocation): string {
+  if (location.toolName) return `tool '${location.toolName}'`
+  if (location.toolUseId) return `tool_result '${location.toolUseId}'`
+  return 'tool_result without a tool_use_id'
+}
+
 export const useStore = create<Store>()(
   (set, get) => ({
       config: defaultConfig,
@@ -421,6 +496,7 @@ export const useStore = create<Store>()(
       lastLatency: null,
       lastStopReason: null,
       runningToolResults: {},
+      autoRunActive: false,
       providers: [],
       execTools: [],
       cases: [],
@@ -816,6 +892,101 @@ export const useStore = create<Store>()(
         }
       },
 
+      autoRun: async () => {
+        const initialState = get()
+        if (
+          initialState.autoRunActive ||
+          initialState.status === 'running' ||
+          Object.keys(initialState.runningToolResults).length > 0
+        ) {
+          return
+        }
+
+        const casePathAtStart = initialState.currentCasePath
+        set({ autoRunActive: true, error: null })
+
+        const ensureSameCase = () => {
+          if (get().currentCasePath !== casePathAtStart) {
+            throw new Error('Auto Run stopped because the current case changed')
+          }
+        }
+
+        try {
+          if (get().execTools.length === 0) {
+            await get().refreshExecTools()
+          }
+          let completed = false
+
+          for (let step = 0; step < AUTO_RUN_MAX_STEPS; step += 1) {
+            ensureSameCase()
+
+            const stubbedMessages = appendToolResultStubsAfterLastAssistant(
+              get().messages,
+            )
+            if (stubbedMessages) {
+              set({ messages: stubbedMessages })
+              continue
+            }
+
+            const emptyToolResults = findEmptyToolResults(get().messages)
+            if (emptyToolResults.length > 0) {
+              const blocked = emptyToolResults.find(
+                (location) =>
+                  !location.toolName || !get().canRunTool(location.toolName),
+              )
+              if (blocked) {
+                throw new Error(
+                  `Auto Run stopped: ${describeToolResultLocation(blocked)} is not runnable`,
+                )
+              }
+
+              for (const location of emptyToolResults) {
+                ensureSameCase()
+                await get().runRegisteredTool(location.msgIdx, location.blockIdx)
+                const message = get().messages[location.msgIdx]
+                const block = message?.content[location.blockIdx]
+                if (
+                  message?.role === 'user' &&
+                  block?.type === 'tool_result' &&
+                  !block.content.trim()
+                ) {
+                  throw new Error(
+                    `Auto Run stopped: ${describeToolResultLocation(location)} did not produce a result`,
+                  )
+                }
+              }
+              continue
+            }
+
+            const last = get().messages[get().messages.length - 1]
+            if (last?.role === 'assistant') {
+              completed = true
+              break
+            }
+
+            await get().send()
+            ensureSameCase()
+            if (get().status === 'error') {
+              throw new Error(get().error ?? 'Auto Run stopped after model error')
+            }
+          }
+
+          if (!completed) {
+            throw new Error(
+              `Auto Run stopped after ${AUTO_RUN_MAX_STEPS} steps to avoid an endless loop`,
+            )
+          }
+        } catch (e) {
+          set({
+            status: 'error',
+            error: (e as Error).message,
+            runningToolResults: {},
+          })
+        } finally {
+          set({ autoRunActive: false })
+        }
+      },
+
       reset: () =>
         set({
           messages: [emptyUserMessage()],
@@ -825,6 +996,7 @@ export const useStore = create<Store>()(
           lastLatency: null,
           lastStopReason: null,
           runningToolResults: {},
+          autoRunActive: false,
           currentCaseDebug: null,
         }),
 
@@ -851,6 +1023,7 @@ export const useStore = create<Store>()(
           lastLatency: null,
           lastStopReason: null,
           runningToolResults: {},
+          autoRunActive: false,
           currentCasePath: path,
           currentCaseMeta: data.meta ?? null,
           currentCaseDebug: data.debug ?? null,
@@ -880,6 +1053,7 @@ export const useStore = create<Store>()(
           lastLatency: parsed.lastRun?.latency_ms ?? null,
           lastStopReason: parsed.lastRun?.stop_reason ?? null,
           runningToolResults: {},
+          autoRunActive: false,
           currentCaseMeta: parsed.meta ?? null,
           currentCaseDebug: parsed.debug ?? null,
         })
@@ -912,6 +1086,7 @@ export const useStore = create<Store>()(
                 lastLatency: data.lastRun?.latency_ms ?? null,
                 lastStopReason: data.lastRun?.stop_reason ?? null,
                 runningToolResults: {},
+                autoRunActive: false,
               })
               return
             } catch {
@@ -937,6 +1112,7 @@ export const useStore = create<Store>()(
             lastLatency: ws.lastLatency ?? null,
             lastStopReason: ws.lastStopReason ?? null,
             runningToolResults: {},
+            autoRunActive: false,
           })
         } catch (e) {
           set({ error: (e as Error).message })
@@ -1204,6 +1380,7 @@ export const useStore = create<Store>()(
           lastLatency: data.lastRun?.latency_ms ?? null,
           lastStopReason: data.lastRun?.stop_reason ?? null,
           runningToolResults: {},
+          autoRunActive: false,
           currentCasePath: path,
           currentCaseMeta: data.meta ?? null,
           currentCaseDebug: data.debug ?? null,
